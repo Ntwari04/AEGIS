@@ -17,6 +17,21 @@ include /etc/nginx/conf.d/managed/*.conf;
 
 limit_req_zone $binary_remote_addr zone=api:10m rate=20r/s;
 
+# Catch-all: a request whose Host matches no server_name is dropped. Without an explicit default_server,
+# Nginx uses the FIRST server defined, and the managed project routes (included above) would win that
+# race, so an unknown Host would be proxied to whichever project container was deployed first.
+server {
+    listen 80 default_server;
+    listen 443 ssl http2 default_server;
+    server_name _;
+
+    ssl_certificate     /etc/nginx/certs/cert.pem;
+    ssl_certificate_key /etc/nginx/certs/key.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    return 444;
+}
+
 server {
     listen 80;
     server_name ${DOMAIN} www.${DOMAIN} auth.${DOMAIN};
