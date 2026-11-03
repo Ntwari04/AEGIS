@@ -43,12 +43,33 @@ This is tested against real Docker and a real Nginx (`apps/api/test/deploy.int.t
 3. GHCR: make the image package public, or set `GHCR_USERNAME` / `GHCR_TOKEN` (PAT with `read:packages`; GHCR does not accept GitHub App tokens).
 4. On the droplet: `sudo chown 1000:1000 infra/nginx/conf.d/managed`, set `DOCKER_GID`, then `docker compose up -d --build deployer`.
 
+## Secrets, the GitHub App and CI keys
+
+**Environment secrets** (dashboard: project page → environment → Secrets, or `PUT /projects/:id/environments/:envId/secrets/:NAME`):
+- Values are write-only, AES-256-GCM encrypted with `SECRETS_ENCRYPTION_KEY` (`openssl rand -base64 32`; add it to `infra/.env`, back it up, never commit it). They are decrypted only by the deployer and injected into the container; the deployment log says how many were injected, never names or values; the audit log records the actor and the name.
+- Names are `UPPER_SNAKE_CASE`; `PORT` and `AEGIS_*` are reserved. Production secrets need devops_engineer / platform_admin. Changes apply at the next deployment.
+- Without the key, secret storage is disabled and refuses writes (fails closed).
+
+**GitHub App** (`GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, key at `infra/secrets/github-app.pem`, mounted read-only at `/run/secrets/aegis/github-app.pem`; on the droplet `chmod 640` it and make it readable by uid 1000):
+- Linking a project to `owner/repo` is refused unless the App is installed on that repository.
+- Each deployment appears in the repository's Deployments tab with its status, environment URL and a link to the log page. Needs the App's **Deployments: read & write** permission; if GitHub refuses, a warning is logged and the deploy is unaffected.
+
+**CI API keys** (created through the API: `POST /projects/:id/api-keys` with scope `deployments:trigger`; there is no dashboard screen for keys yet): a CI job can call
+
+```
+curl -X POST https://$DOMAIN/api/v1/ci/deployments -H "X-API-Key: $AEGIS_KEY" -H "Idempotency-Key: $GITHUB_RUN_ID" \
+  -H "Content-Type: application/json" -d '{"environment":"staging","commitSha":"<40-char sha>"}'
+```
+
+The key only works on this route, only for its own project, and **never for production**. Revoke it to stop it immediately.
+
 ## Known gaps
 
-- Per-environment secret values (env vars for deployed apps) are not injected yet; only `PORT` and `AEGIS_*` are. Phase 5 secrets work.
+- "Target server" per environment: single host in v1.
 - Deploys are serialized (concurrency 1). Fine for v1.
-- The GitHub App key is not used yet (reserved for commit-status reporting); webhook auth is HMAC only.
-- Deployer holds the Docker socket (root-equivalent on the host). It is isolated: no ports, no HTTP, capabilities dropped, API never mounts it.
+- The deployer holds the Docker socket (root-equivalent on the host). It is isolated: no ports, no HTTP, capabilities dropped, read-only filesystem, and the API never mounts it.
+- An API key keeps working if its creator leaves the project; revoke keys when offboarding.
+- A container's last output is stored in the deployment log on failure; if an app prints its own secrets, they would appear there.
 
 ## Verified live (local stack, 2026-11-03)
 

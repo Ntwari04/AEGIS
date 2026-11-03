@@ -50,6 +50,19 @@ test('platform admin: redirected to Keycloak, enrols TOTP, lands authenticated, 
   await page.getByTestId('create-project').click();
   await expect(page.getByTestId('project-name')).toHaveText('E2E Project');
 
+  // 6b. Add an environment on the project page; a platform admin sees deploy and secret controls (FR-PROJ-3)
+  await page.locator('#env-name').fill('staging');
+  await page.locator('#env-domain').fill('staging.example.com');
+  await page.locator('#env-mem').fill('256');
+  await page.getByTestId('add-environment').click();
+  const env = page.getByTestId('env-staging');
+  await expect(env).toBeVisible();
+  await expect(env).toContainText('staging.example.com');
+  await expect(env).toContainText('256 MB');
+  await expect(page.getByTestId('deploy-staging')).toBeVisible();
+  await expect(page.getByTestId('secrets-staging')).toBeVisible();
+  await expect(page.getByTestId('page-error')).toHaveCount(0);
+
   // 7. It shows up in the list, with the creator as OWNER
   await page.goto('/projects');
   await expect(page.getByRole('link', { name: 'E2E Project' }).first()).toBeVisible();

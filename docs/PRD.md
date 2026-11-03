@@ -274,13 +274,13 @@ Core entities: `User` (mirrors Keycloak subject, not the password), `Role`, `Pro
 
 ---
 
-## 16. Implementation notes & deviations (updated during Phase 2 build)
+## 16. Implementation notes & deviations (updated through Phase 3)
 
 Recorded so the spec and the code do not drift. Items marked **Open** are not yet met.
 
 - **Roles (FR-IAM-3 / §9):** there is no `Role` table. Roles live only in Keycloak and arrive as the `roles` claim of the validated JWT. A marker realm role `mfa_required` is included in the `platform_admin` and `devops_engineer` composites; the browser flow requires TOTP for holders of it (FR-IAM-2). `developer` MFA is not forced.
 - **OpenAPI (§10):** the Swagger UI at `/api/docs` is **Open**; it is deferred until it can be placed behind authentication.
-- **FR-IAM-5 API keys:** create / list / revoke are implemented (SHA-256 at rest, project-scoped, scopes `deployments:trigger`, `deployments:read`). *Authenticating with* an API key is **Open** and lands with the Deployment Engine (Phase 3).
+- **FR-IAM-5 API keys:** create / list / revoke (SHA-256 at rest, project-scoped, scopes `deployments:trigger`, `deployments:read`). A key authenticates **one** route, `POST /api/v1/ci/deployments` (header `X-API-Key`), for CI to trigger a deployment of its own project. It can **never deploy to production** (a key carries no role, and FR-DEPLOY-6 requires a privileged human) and is not a bearer token anywhere else. A key keeps working if its creator is later removed from the project, so revoking keys is part of offboarding (§8.3).
 - **FR-IAM-6 auth events:** the API audits rejected tokens, role denials and project-access denials. Login success/failure/MFA events are emitted by Keycloak (event listeners enabled in the realm) to its logs; surfacing them in the audit view and the failed-login alert is **Open** (Phase 4, with Loki).
 - **FR-IAM-7:** access token 15 min, SSO session max 8 h, refresh tokens rotate and are single-use (configured in the realm). A role change takes effect at the next token refresh (≤ 15 min). Immediate server-side revocation / forced re-auth on role change is **Open**.
 - **Access to non-members** returns `404` (not `403`) so project existence is not disclosed; the attempt is audited (`authz.project_denied`).
@@ -289,6 +289,12 @@ Recorded so the spec and the code do not drift. Items marked **Open** are not ye
 - **CSP (§8.5):** the dashboard ships a CSP with `'unsafe-inline'` for scripts (Next.js inline bootstrap). A nonce-based CSP is **Open**.
 - **Images:** the API image reuses the build stage (non-root, but not slimmed); slimming with `pnpm deploy --prod` is a follow-up.
 - **Build tooling:** the API is compiled with `tsc` rather than the Nest CLI.
+- **Phase 3, deployment engine (FR-DEPLOY-1..6):** a separate `deployer` process is the only holder of the Docker socket; deployments are serialized; the route is switched only after the new container is healthy and verified through Nginx, so a failed health check always rolls back (verified live against GitHub Actions, GHCR and Docker). Push-triggered deploys react to the successful `workflow_run` of the CI workflow (default name `Build image`), not to the push itself, because the image does not exist until CI finishes. GHCR does not accept GitHub App tokens, so a private image needs `GHCR_USERNAME` / `GHCR_TOKEN` (a `read:packages` PAT); a public package needs nothing.
+- **FR-PROJ-2 GitHub App:** the App is used for what it can do: linking a project to a repository is refused unless the installation can see it, and each deployment is reported to GitHub as a Deployment with status and log link (best effort, never affects the deploy). It is **not** used to pull images (GHCR limitation above) or to authenticate webhooks (HMAC). Repository access check and status reporting are skipped when no App is configured.
+- **FR-PROJ-3 / FR-SEC-5 environment secrets:** secret env var values are stored AES-256-GCM encrypted (key `SECRETS_ENCRYPTION_KEY`, ciphertext bound to environment + name), are write-only (no API returns a value), are never logged or audited (the audit log records the name and actor), and are decrypted only by the deployer when starting a container. Who may write follows FR-DEPLOY-6. Without the key, secret storage is disabled and fails closed. Rotation = re-enter the value; changing the key makes existing values unreadable. This is the at-minimum approach from §8.3, a real secrets manager remains recommended before production launch.
+- **FR-PROJ-3 resource limits:** per-environment memory (MB) and CPU limits are validated and applied to the container. "Target server" is **Open** (single host in v1).
+- **FR-DEPLOY-3 logs:** each deployment has a log (steps, health-gate result, last container output on failure) shown on its own page. Streaming live container logs lands with Loki in Phase 4.
+- **Nginx default server:** an explicit catch-all `default_server` drops requests whose Host matches no configured domain; without it the first managed project route would become the default for unknown hosts.
 - **Local ports:** the dev override uses non-default ports (Postgres 15432, Redis 16379, Keycloak 18080, web 13000).
 
 ---
