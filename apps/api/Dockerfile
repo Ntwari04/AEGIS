@@ -15,10 +15,15 @@ USER node
 WORKDIR /repo/apps/api
 CMD ["npx", "prisma", "migrate", "deploy"]
 
-# Runtime image. (Follow-up: slim with `pnpm deploy --prod` once the Prisma client layout is settled.)
-FROM build AS runtime
+# Runtime image: a fresh stage, so build-time layers (pnpm store, corepack cache) are not shipped.
+# (Follow-up: slim further with pnpm deploy --prod once the Prisma client layout is settled.)
+FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
-RUN chown -R node:node /repo
+# openssl is required by the Prisma engine. npm/yarn are not needed at runtime; the copies bundled in
+# the base image carry HIGH CVEs.
+RUN apk add --no-cache openssl \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg
+COPY --from=build --chown=node:node /repo /repo
 USER node
 WORKDIR /repo/apps/api
 EXPOSE 4000
