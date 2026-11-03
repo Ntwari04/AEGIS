@@ -1,5 +1,5 @@
 # Build context is the repository root (see infra/docker-compose.yml).
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 RUN corepack enable
 WORKDIR /repo
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
@@ -10,7 +10,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store --mount=type=cache,t
  && pnpm --filter @aegisops/shared-types build \
  && pnpm --filter @aegisops/web build
 
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 HOSTNAME=0.0.0.0
 # npm/yarn are not needed at runtime; the copies bundled in the base image carry HIGH CVEs.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg
