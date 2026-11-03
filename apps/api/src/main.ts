@@ -12,4 +12,7 @@ async function bootstrap() {
   await app.listen(env.port, '0.0.0.0');
 }
 
-void bootstrap();
+bootstrap().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

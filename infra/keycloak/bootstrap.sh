@@ -1,62 +1,78 @@
 #!/bin/sh
 #
-# AegisOps — Keycloak realm/client/role bootstrap (Phase 2, PRD Section 5.2/6.1)
+# AegisOps — Keycloak day-2 operations (Phase 2, PRD 6.1 / 8.1).
 #
-# Run this INSIDE the Keycloak container after it's up, from your host:
+# The realm, roles, MFA flow and the OIDC client are DECLARATIVE: they live in
+# realm-aegisops.json and are imported when Keycloak first starts on an empty
+# database. To tear down and recreate everything:
+#     docker compose down keycloak && docker exec aegisops-postgres \
+#       psql -U postgres -c 'DROP DATABASE keycloak' -c 'CREATE DATABASE keycloak OWNER keycloak'
+#     docker compose up -d keycloak
+#
+# This script covers the parts that must NOT be in a committed file: people.
+# It runs inside the container, which already has KC_BOOTSTRAP_ADMIN_* set:
+#
 #   docker cp infra/keycloak/bootstrap.sh aegisops-keycloak:/tmp/bootstrap.sh
-#   docker exec -it aegisops-keycloak sh /tmp/bootstrap.sh
+#   docker exec -e INITIAL_ADMIN_USERNAME=you -e INITIAL_ADMIN_EMAIL=you@corp.com \
+#               -e INITIAL_ADMIN_PASSWORD='temp-password-12+chars' \
+#               aegisops-keycloak sh /tmp/bootstrap.sh create-admin
+#   docker exec -e MASTER_ADMIN_USERNAME=you -e MASTER_ADMIN_PASSWORD='...' \
+#               aegisops-keycloak sh /tmp/bootstrap.sh rotate-bootstrap-admin
 #
-# Safe to re-run: steps that fail because the thing already exists just
-# print a note and continue instead of aborting the whole script.
+# Commands: create-admin | rotate-bootstrap-admin | seed-dev-users (local only)
 
-set -e
+set -eu
 KCADM=/opt/keycloak/bin/kcadm.sh
 REALM=aegisops
-CLIENT_ID=aegisops-web
-ADMIN_USER=${KC_BOOTSTRAP_ADMIN_USERNAME:-admin}
-ADMIN_PASS=${KC_BOOTSTRAP_ADMIN_PASSWORD:-admin}
 
-echo "==> Authenticating kcadm against the master realm"
-$KCADM config credentials --server http://localhost:8080 --realm master --user "$ADMIN_USER" --password "$ADMIN_PASS"
+login() {
+  : "${KC_BOOTSTRAP_ADMIN_USERNAME:?}" "${KC_BOOTSTRAP_ADMIN_PASSWORD:?}"
+  "$KCADM" config credentials --server http://localhost:8080 --realm master \
+    --user "${LOGIN_USER:-$KC_BOOTSTRAP_ADMIN_USERNAME}" --password "${LOGIN_PASSWORD:-$KC_BOOTSTRAP_ADMIN_PASSWORD}" >/dev/null
+}
 
-echo "==> Creating realm: $REALM"
-$KCADM create realms -s realm=$REALM -s enabled=true || echo "   (realm may already exist, continuing)"
+# create_user <username> <email> <password> <role> [temporary: true|false]
+create_user() {
+  u=$1; e=$2; p=$3; role=$4; temp=${5:-true}
+  if "$KCADM" get users -r "$REALM" -q "username=$u" --fields username --format csv --noquotes | grep -qx "$u"; then
+    echo "   user '$u' already exists, skipping"; return
+  fi
+  "$KCADM" create users -r "$REALM" -s "username=$u" -s "email=$e" -s enabled=true -s emailVerified=true
+  "$KCADM" set-password -r "$REALM" --username "$u" --new-password "$p" $([ "$temp" = true ] && echo --temporary)
+  "$KCADM" add-roles -r "$REALM" --uusername "$u" --rolename "$role"
+  echo "   created '$u' with role $role"
+}
 
-echo "==> Creating roles: platform_admin, devops_engineer, developer, auditor"
-for ROLE in platform_admin devops_engineer developer auditor; do
-  $KCADM create roles -r $REALM -s name=$ROLE || echo "   (role $ROLE may already exist)"
-done
+case "${1:-}" in
+  create-admin)
+    : "${INITIAL_ADMIN_USERNAME:?}" "${INITIAL_ADMIN_EMAIL:?}" "${INITIAL_ADMIN_PASSWORD:?}"
+    login
+    # Temporary password: the user must change it, and (as platform_admin) enrol TOTP, at first login.
+    create_user "$INITIAL_ADMIN_USERNAME" "$INITIAL_ADMIN_EMAIL" "$INITIAL_ADMIN_PASSWORD" platform_admin true
+    ;;
 
-echo "==> Creating client: $CLIENT_ID (confidential, standard flow + PKCE)"
-$KCADM create clients -r $REALM \
-  -s clientId=$CLIENT_ID \
-  -s enabled=true \
-  -s publicClient=false \
-  -s standardFlowEnabled=true \
-  -s directAccessGrantsEnabled=false \
-  -s 'redirectUris=["http://localhost:3000/*"]' \
-  -s 'webOrigins=["http://localhost:3000"]' \
-  -s 'attributes={"pkce.code.challenge.method":"S256"}' \
-  || echo "   (client may already exist)"
+  rotate-bootstrap-admin)
+    # KC 26's bootstrap admin is meant to be temporary: create a real master-realm admin, then delete it.
+    : "${MASTER_ADMIN_USERNAME:?}" "${MASTER_ADMIN_PASSWORD:?}"
+    login
+    "$KCADM" create users -r master -s "username=$MASTER_ADMIN_USERNAME" -s enabled=true || true
+    "$KCADM" set-password -r master --username "$MASTER_ADMIN_USERNAME" --new-password "$MASTER_ADMIN_PASSWORD"
+    "$KCADM" add-roles -r master --uusername "$MASTER_ADMIN_USERNAME" --rolename admin
+    LOGIN_USER=$MASTER_ADMIN_USERNAME LOGIN_PASSWORD=$MASTER_ADMIN_PASSWORD login
+    BOOT_ID=$("$KCADM" get users -r master -q "username=$KC_BOOTSTRAP_ADMIN_USERNAME" --fields id --format csv --noquotes | tail -n1)
+    [ -n "$BOOT_ID" ] && "$KCADM" delete "users/$BOOT_ID" -r master && echo "   deleted bootstrap admin"
+    echo "Now remove KC_BOOTSTRAP_ADMIN_* from infra/.env or set them to throwaway values."
+    ;;
 
-echo ""
-echo "==> Client secret — put this in apps/web/.env as KEYCLOAK_CLIENT_SECRET (never commit it):"
-CLIENT_UUID=$($KCADM get clients -r $REALM -q clientId=$CLIENT_ID --fields id --format csv --noquotes | tail -n1)
-$KCADM get clients/$CLIENT_UUID/client-secret -r $REALM
+  seed-dev-users)
+    [ "${KEYCLOAK_DEV_SEED:-}" = "true" ] || { echo "refusing: set KEYCLOAK_DEV_SEED=true (local development only)"; exit 1; }
+    : "${DEV_USER_PASSWORD:?}"
+    login
+    create_user dev-devops  dev-devops@example.test  "$DEV_USER_PASSWORD" devops_engineer false
+    create_user dev-dev     dev-dev@example.test     "$DEV_USER_PASSWORD" developer false
+    create_user dev-dev2    dev-dev2@example.test    "$DEV_USER_PASSWORD" developer false
+    create_user dev-auditor dev-auditor@example.test "$DEV_USER_PASSWORD" auditor false
+    ;;
 
-echo ""
-echo "=================================================================="
-echo " Bootstrap complete."
-echo " Realm '$REALM' with roles platform_admin/devops_engineer/developer/auditor"
-echo " and client '$CLIENT_ID' are ready."
-echo ""
-echo " Create your first login user with (replace <you> / pick a real password):"
-echo "   $KCADM create users -r $REALM -s username=<you> -s enabled=true \\"
-echo "     -s email=<you>@inclusivitysolutions.com -s emailVerified=true"
-echo "   $KCADM set-password -r $REALM --username <you> --new-password '<pick one>'"
-echo "   $KCADM add-roles -r $REALM --uusername <you> --rolename platform_admin"
-echo ""
-echo " Per PRD FR-IAM-2, MFA is required for platform_admin/devops_engineer in"
-echo " production — add that as a required action once you're past local testing:"
-echo "   $KCADM update users/<user-id> -r $REALM -s 'requiredActions=[\"CONFIGURE_TOTP\"]'"
-echo "=================================================================="
+  *) sed -n '2,27p' "$0"; exit 2 ;;
+esac

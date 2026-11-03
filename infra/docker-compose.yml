@@ -2,6 +2,15 @@ networks:
   aegisops-net:
     external: true   # created ahead of time by scripts/03-create-network.sh
 
+volumes:
+  postgres-data:
+  redis-data:
+
+# SECURITY INVARIANT (PRD 8.6/8.7): only `nginx` publishes ports to the host.
+# postgres, redis, keycloak, api and web are reachable solely on aegisops-net.
+# infra/docker-compose.dev.yml adds 127.0.0.1-only ports for local development;
+# never pass it on the droplet. CI (apps/api/test/compose-invariants) enforces this.
+
 services:
   nginx:
     image: nginx:stable-alpine
@@ -17,5 +26,140 @@ services:
       - ./nginx/conf.d:/etc/nginx/conf.d   # writable: the entrypoint renders templates/*.template into here on start
       - ./nginx/templates:/etc/nginx/templates:ro
       - ./nginx/certs:/etc/nginx/certs:ro
+    networks:
+      - aegisops-net
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: aegisops-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set in infra/.env}
+      AEGISOPS_DB_PASSWORD: ${AEGISOPS_DB_PASSWORD:?set in infra/.env}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set in infra/.env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - aegisops-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: aegisops-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set in infra/.env}
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - aegisops-net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4
+    container_name: aegisops-keycloak
+    restart: unless-stopped
+    command: ["start", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set in infra/.env}
+      KC_HOSTNAME: https://auth.${DOMAIN}
+      KC_HTTP_ENABLED: "true"          # TLS terminates at Nginx; Keycloak is never exposed directly
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?set in infra/.env}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?set in infra/.env}
+      # Substituted into realm-aegisops.json at import time (never committed):
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:?set in infra/.env}
+      WEB_ORIGIN: https://${DOMAIN}
+    volumes:
+      - ./keycloak/realm-aegisops.json:/opt/keycloak/data/import/realm-aegisops.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # The image has no curl; probe the management port with bash's /dev/tcp.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\": \"UP\"' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - aegisops-net
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    image: aegisops-api:local
+    container_name: aegisops-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      DATABASE_URL: postgresql://aegisops:${AEGISOPS_DB_PASSWORD}@postgres:5432/aegisops
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      WEB_ORIGIN: https://${DOMAIN}
+      KEYCLOAK_ISSUER: https://auth.${DOMAIN}/realms/aegisops
+      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/aegisops/protocol/openid-connect/certs
+      KEYCLOAK_AUDIENCE: aegisops-api
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    read_only: true
+    tmpfs: [/tmp]
+    networks:
+      - aegisops-net
+
+  # Migrations are an explicit step, never "sync on boot" (PRD 11):
+  #   docker compose --profile tools run --rm migrate
+  migrate:
+    profiles: ["tools"]
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+      target: migrate
+    environment:
+      DATABASE_URL: postgresql://aegisops:${AEGISOPS_DB_PASSWORD}@postgres:5432/aegisops
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks:
+      - aegisops-net
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    image: aegisops-web:local
+    container_name: aegisops-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      AUTH_URL: https://${DOMAIN}
+      AUTH_TRUST_HOST: "true"
+      AUTH_SECRET: ${AUTH_SECRET:?set in infra/.env}
+      KEYCLOAK_ISSUER: https://auth.${DOMAIN}/realms/aegisops
+      KEYCLOAK_CLIENT_ID: aegisops-web
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      API_URL: http://api:4000/api/v1
+    depends_on:
+      - api
+    read_only: true
+    tmpfs: [/tmp, /app/apps/web/.next/cache]
     networks:
       - aegisops-net

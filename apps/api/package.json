@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "prisma generate && nest build",
+    "build": "prisma generate && rm -rf dist && tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
-    "start:dev": "nest start --watch",
+    "start:dev": "tsc -p tsconfig.build.json --watch",
     "prisma:generate": "prisma generate",
     "migrate:deploy": "prisma migrate deploy",
     "test": "jest --selectProjects unit",

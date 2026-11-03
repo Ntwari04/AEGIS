@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { Logger, CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { IS_PUBLIC } from './decorators';
 import { TokenVerifier } from './token-verifier.service';
@@ -7,6 +7,8 @@ import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
+  private readonly logger = new Logger(JwtAuthGuard.name);
+
   constructor(
     private readonly reflector: Reflector,
     private readonly verifier: TokenVerifier,
@@ -26,7 +28,9 @@ export class JwtAuthGuard implements CanActivate {
     let verified;
     try {
       verified = await this.verifier.verify(match[1]);
-    } catch {
+    } catch (err) {
+      // Reason code only (e.g. ERR_JWT_EXPIRED, ERR_JWT_CLAIM_VALIDATION_FAILED); never the token.
+      this.logger.warn(`token rejected: ${(err as { code?: string }).code ?? (err as Error).name}: ${(err as Error).message}`);
       // FR-IAM-6: failed authentication is an audited event. The token itself is never logged.
       await this.audit.record({ action: 'auth.token_rejected', result: 'DENIED', sourceIp: req.ip });
       throw new UnauthorizedException('Invalid or expired token');
