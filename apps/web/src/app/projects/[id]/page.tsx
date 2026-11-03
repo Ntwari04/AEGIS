@@ -31,9 +31,10 @@ async function createEnvironment(projectId: string, formData: FormData) {
         healthPath: optional('healthPath'),
         imageRepo: optional('imageRepo'),
       }),
-    });
+    }, { redirectOn401: false });
   } catch (e) {
-    back(projectId, e instanceof ApiError ? e.message : 'Could not create environment');
+    if (e instanceof ApiError) back(projectId, e.message);
+    throw e;
   }
   back(projectId);
 }
@@ -45,9 +46,10 @@ async function deploy(projectId: string, envId: string, formData: FormData) {
       method: 'POST',
       headers: { 'Idempotency-Key': crypto.randomUUID() },
       body: JSON.stringify({ commitSha: text(formData, 'commitSha') }),
-    });
+    }, { redirectOn401: false });
   } catch (e) {
-    back(projectId, e instanceof ApiError ? e.message : 'Could not start deployment');
+    if (e instanceof ApiError) back(projectId, e.message);
+    throw e;
   }
   back(projectId);
 }
@@ -58,9 +60,11 @@ async function rollback(projectId: string, envId: string, deploymentId: string) 
     await api(
       `/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(envId)}/deployments/${encodeURIComponent(deploymentId)}/rollback`,
       { method: 'POST' },
+      { redirectOn401: false },
     );
   } catch (e) {
-    back(projectId, e instanceof ApiError ? e.message : 'Could not start rollback');
+    if (e instanceof ApiError) back(projectId, e.message);
+    throw e;
   }
   back(projectId);
 }

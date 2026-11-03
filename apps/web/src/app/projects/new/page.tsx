@@ -16,11 +16,12 @@ async function createProject(formData: FormData) {
         ...(description ? { description } : {}),
         ...(githubRepo ? { githubRepo } : {}),
       }),
-    });
+    }, { redirectOn401: false });
     id = p.id;
   } catch (e) {
-    const msg = e instanceof ApiError ? e.message : 'Could not create project';
-    redirect(`/projects/new?error=${encodeURIComponent(msg)}`);
+    // Only API errors are reported; Next's redirect exceptions must propagate.
+    if (!(e instanceof ApiError)) throw e;
+    redirect(`/projects/new?error=${encodeURIComponent(e.message)}`);
   }
   redirect(`/projects/${id}`);
 }
