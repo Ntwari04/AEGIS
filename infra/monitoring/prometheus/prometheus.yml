@@ -1,0 +1,55 @@
+# Prometheus (PRD 6.6, FR-MON-1..3). Internal only: never published, reached by Grafana and the AegisOps API on aegisops-net.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs: [{ targets: ["localhost:9090"] }]
+
+  # FR-MON-1: request latency/errors, queue depth, deployment counts, expected environment containers.
+  - job_name: aegisops-api
+    metrics_path: /metrics
+    static_configs: [{ targets: ["api:4000"] }]
+
+  # FR-MON-2: every container is discovered here (read through docker-proxy); the aegisops.* labels the Deployment
+  # Engine puts on each managed container become the project / environment labels, with no per-project config.
+  - job_name: containers
+    static_configs: [{ targets: ["container-exporter:9102"] }]
+
+  - job_name: node
+    static_configs: [{ targets: ["node-exporter:9100"] }]
+
+  # Keycloak management port (not published; Nginx also 404s /metrics on auth.$DOMAIN). Failed-login counters feed FR-MON-3.
+  - job_name: keycloak
+    metrics_path: /metrics
+    static_configs: [{ targets: ["keycloak:9000"] }]
+
+  - job_name: loki
+    static_configs: [{ targets: ["loki:3100"] }]
+  - job_name: promtail
+    static_configs: [{ targets: ["promtail:9080"] }]
+  - job_name: alertmanager
+    static_configs: [{ targets: ["alertmanager:9093"] }]
+
+  # Certificate expiry (FR-MON-3): probe the TLS listener of Nginx. The origin cert is a Cloudflare origin cert, so
+  # chain verification is off in the blackbox module; only the expiry timestamp matters here.
+  - job_name: tls-expiry
+    metrics_path: /probe
+    params: { module: [tls_expiry] }
+    static_configs: [{ targets: ["nginx:443"] }]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115

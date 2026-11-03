@@ -1,0 +1,10 @@
+modules:
+  # Only the certificate's expiry time is read (probe_ssl_earliest_cert_expiry). The origin certificate is a Cloudflare
+  # origin certificate, which no public CA chain validates, so chain verification is deliberately off for this probe.
+  tls_expiry:
+    prober: tcp
+    timeout: 8s
+    tcp:
+      tls: true
+      tls_config:
+        insecure_skip_verify: true

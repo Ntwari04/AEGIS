@@ -1,0 +1,24 @@
+# Routing (FR-MON-4): this file is config, not code. Change it and restart alertmanager; no deployment of AegisOps is needed.
+# The `receivers:` section is appended by entrypoint.sh from the environment (Slack webhook and/or SMTP) so that
+# credentials never live in a committed file.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default
+  group_by: [alertname, project, environment]
+  group_wait: 20s
+  group_interval: 2m
+  repeat_interval: 4h
+  routes:
+    # Critical alerts repeat more often.
+    - matchers: ['severity="critical"']
+      receiver: default
+      repeat_interval: 1h
+
+inhibit_rules:
+  # A platform-wide scrape failure should not also page for every dependent warning.
+  - source_matchers: ['alertname="PlatformContainerDown"']
+    target_matchers: ['alertname="ScrapeTargetDown"']
+    equal: []
+

@@ -1,0 +1,36 @@
+# Promtail ships container logs to Loki (PRD 6.6, FR-MON-2). It discovers containers through the read-only
+# docker-socket-proxy (never the real Docker socket) and labels each stream from the container's own labels:
+# `container`, plus `project` / `environment` for anything the Deployment Engine launched (aegisops.* labels).
+server:
+  http_listen_port: 9080
+  log_level: warn
+
+positions:
+  filename: /positions/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: tcp://docker-proxy:2375
+        refresh_interval: 10s
+        # Only the platform's own network: logs of other workloads on the host are never read or stored.
+        filters:
+          - name: network
+            values: [aegisops-net]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.*)
+        target_label: container
+      - source_labels: [__meta_docker_container_label_aegisops_project]
+        target_label: project
+      - source_labels: [__meta_docker_container_label_aegisops_environment]
+        target_label: environment
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      - target_label: job
+        replacement: docker
+    pipeline_stages:
+      - docker: {}

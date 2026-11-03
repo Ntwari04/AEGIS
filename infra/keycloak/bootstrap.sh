@@ -19,7 +19,7 @@
 #   docker exec -e MASTER_ADMIN_USERNAME=you -e MASTER_ADMIN_PASSWORD='...' \
 #               aegisops-keycloak sh /tmp/bootstrap.sh rotate-bootstrap-admin
 #
-# Commands: create-admin | rotate-bootstrap-admin | seed-dev-users (local only)
+# Commands: create-admin | rotate-bootstrap-admin | add-grafana-client | seed-dev-users (local only)
 
 set -eu
 KCADM=/opt/keycloak/bin/kcadm.sh
@@ -62,6 +62,30 @@ case "${1:-}" in
     BOOT_ID=$("$KCADM" get users -r master -q "username=$KC_BOOTSTRAP_ADMIN_USERNAME" --fields id --format csv --noquotes | tail -n1)
     [ -n "$BOOT_ID" ] && "$KCADM" delete "users/$BOOT_ID" -r master && echo "   deleted bootstrap admin"
     echo "Now remove KC_BOOTSTRAP_ADMIN_* from infra/.env or set them to throwaway values."
+    ;;
+
+  add-grafana-client)
+    # For a realm imported before Phase 4: the realm file only seeds an EMPTY database. Idempotent.
+    : "${GRAFANA_OAUTH_SECRET:?}" "${GRAFANA_ORIGIN:?}"
+    login
+    if "$KCADM" get clients -r "$REALM" -q clientId=aegisops-grafana --fields clientId --format csv --noquotes | grep -qx aegisops-grafana; then
+      echo "   client 'aegisops-grafana' already exists, updating its secret and redirect URI"
+      CID=$("$KCADM" get clients -r "$REALM" -q clientId=aegisops-grafana --fields id --format csv --noquotes)
+      "$KCADM" update "clients/$CID" -r "$REALM" -s "secret=$GRAFANA_OAUTH_SECRET" -s "redirectUris=[\"$GRAFANA_ORIGIN/login/generic_oauth\"]" -s "webOrigins=[\"$GRAFANA_ORIGIN\"]"
+    else
+      "$KCADM" create clients -r "$REALM" \
+        -s clientId=aegisops-grafana -s name="AegisOps Grafana" -s enabled=true -s publicClient=false \
+        -s "secret=$GRAFANA_OAUTH_SECRET" -s standardFlowEnabled=true -s implicitFlowEnabled=false \
+        -s directAccessGrantsEnabled=false -s serviceAccountsEnabled=false \
+        -s "redirectUris=[\"$GRAFANA_ORIGIN/login/generic_oauth\"]" -s "webOrigins=[\"$GRAFANA_ORIGIN\"]" \
+        -s 'attributes."pkce.code.challenge.method"=S256' -s 'attributes."access.token.lifespan"=900'
+      CID=$("$KCADM" get clients -r "$REALM" -q clientId=aegisops-grafana --fields id --format csv --noquotes)
+      "$KCADM" create "clients/$CID/protocol-mappers/models" -r "$REALM" \
+        -s name=realm-roles-flat -s protocol=openid-connect -s protocolMapper=oidc-usermodel-realm-role-mapper \
+        -s 'config."claim.name"=roles' -s 'config.multivalued=true' -s 'config."jsonType.label"=String' \
+        -s 'config."id.token.claim"=true' -s 'config."access.token.claim"=true' -s 'config."userinfo.token.claim"=true'
+      echo "   created client 'aegisops-grafana'"
+    fi
     ;;
 
   seed-dev-users)

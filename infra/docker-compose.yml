@@ -5,6 +5,11 @@ networks:
 volumes:
   postgres-data:
   redis-data:
+  prometheus-data:
+  alertmanager-data:
+  loki-data:
+  promtail-positions:
+  grafana-data:
 
 # SECURITY INVARIANT (PRD 8.6/8.7): only `nginx` publishes ports to the host.
 # postgres, redis, keycloak, api and web are reachable solely on aegisops-net.
@@ -81,11 +86,15 @@ services:
       KC_HTTP_ENABLED: "true"          # TLS terminates at Nginx; Keycloak is never exposed directly
       KC_PROXY_HEADERS: xforwarded
       KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"               # management port 9000, not published; scraped by Prometheus
+      KC_EVENT_METRICS_USER_ENABLED: "true"    # counts login_error events for the failed-logins alert
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?set in infra/.env}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?set in infra/.env}
       # Substituted into realm-aegisops.json at import time (never committed):
       KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:?set in infra/.env}
       WEB_ORIGIN: https://${DOMAIN}
+      GRAFANA_ORIGIN: https://grafana.${DOMAIN}
+      GRAFANA_OAUTH_SECRET: ${GRAFANA_OAUTH_SECRET:?set in infra/.env}
     volumes:
       - ./keycloak/realm-aegisops.json:/opt/keycloak/data/import/realm-aegisops.json:ro
     depends_on:
@@ -119,6 +128,10 @@ services:
       KEYCLOAK_AUDIENCE: aegisops-api
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?set in infra/.env}
       GITHUB_DEPLOY_WORKFLOW: ${GITHUB_DEPLOY_WORKFLOW:-Build image}
+      # Dashboard health data (FR-DASH-3): read from Prometheus / Alertmanager on the internal network
+      PROMETHEUS_URL: http://prometheus:9090
+      ALERTMANAGER_URL: http://alertmanager:9093
+      GRAFANA_PUBLIC_URL: https://grafana.${DOMAIN}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-0}
       GITHUB_INSTALLATION_ID: ${GITHUB_INSTALLATION_ID:-0}
       GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/aegis/github-app.pem   # ./secrets/ is mounted read-only below
@@ -177,6 +190,209 @@ services:
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    networks:
+      - aegisops-net
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # Monitoring & observability (Phase 4, PRD 6.6). Nothing here publishes a port: Prometheus, Alertmanager, Loki and the
+  # exporters are reachable only on aegisops-net; Grafana is reachable only through Nginx at grafana.$DOMAIN, behind Keycloak.
+  # ---------------------------------------------------------------------------------------------------------------
+
+  # Read-only view of the Docker API for cAdvisor and Promtail. Only GET on containers/info/version/events is allowed
+  # (POST=0, everything else off), so a compromise of either consumer cannot start, stop or create containers.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: aegisops-docker-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"
+      INFO: "1"
+      EVENTS: "1"
+      PING: "1"
+      VERSION: "1"
+      POST: "0"
+      IMAGES: "0"
+      NETWORKS: "1"   # read-only metadata Promtail needs for network labels; POST=0 still blocks every write
+      VOLUMES: "0"
+      EXEC: "0"
+      SECRETS: "0"
+      SERVICES: "0"
+      TASKS: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      CONFIGS: "0"
+      PLUGINS: "0"
+      SWARM: "0"
+      SYSTEM: "0"
+      AUTH: "0"
+      DISTRIBUTION: "0"
+      NODES: "0"
+      SESSION: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - aegisops-net
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: aegisops-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    mem_limit: 512m
+    security_opt: ["no-new-privileges:true"]
+    depends_on: [alertmanager]
+    networks:
+      - aegisops-net
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    container_name: aegisops-alertmanager
+    restart: unless-stopped
+    # Receivers are rendered from these variables at start-up (monitoring/alertmanager/entrypoint.sh); routing is config.
+    entrypoint: ["/bin/sh", "/etc/alertmanager/entrypoint.sh"]
+    environment:
+      ALERT_SLACK_WEBHOOK_URL: ${ALERT_SLACK_WEBHOOK_URL:-}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
+      ALERT_SMTP_HOST: ${ALERT_SMTP_HOST:-}
+      ALERT_SMTP_PORT: ${ALERT_SMTP_PORT:-587}
+      ALERT_SMTP_USER: ${ALERT_SMTP_USER:-}
+      ALERT_SMTP_PASSWORD: ${ALERT_SMTP_PASSWORD:-}
+    volumes:
+      - ./monitoring/alertmanager:/etc/alertmanager:ro
+      - alertmanager-data:/alertmanager
+    tmpfs: [/tmp]
+    mem_limit: 128m
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - aegisops-net
+
+  # Container metrics (state, restarts, health, CPU, memory) from the Docker API via the read-only docker-proxy.
+  # First-party (apps/api/src/exporter.ts): no host mounts, no database, no secrets, and the same on Docker Desktop and Linux.
+  container-exporter:
+    image: aegisops-api:local
+    container_name: aegisops-container-exporter
+    restart: unless-stopped
+    command: ["node", "dist/exporter.js"]
+    healthcheck:   # the api image's HEALTHCHECK probes :4000; the exporter listens on 9102
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9102/healthz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    environment:
+      NODE_ENV: production
+      PORT: "9102"
+      DOCKER_PROXY_HOST: docker-proxy
+      DOCKER_PROXY_PORT: "2375"
+      DOCKER_NETWORK: aegisops-net   # report only the platform's own containers, never other workloads on the host
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    depends_on: [docker-proxy]
+    networks:
+      - aegisops-net
+
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    container_name: aegisops-node-exporter
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+|host/(dev|proc|sys))($|/)
+    volumes:
+      - /:/host:ro
+    mem_limit: 64m
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - aegisops-net
+
+  blackbox:
+    image: prom/blackbox-exporter:v0.27.0
+    container_name: aegisops-blackbox
+    restart: unless-stopped
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./monitoring/blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    mem_limit: 64m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - aegisops-net
+
+  loki:
+    image: grafana/loki:3.5.0
+    container_name: aegisops-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./monitoring/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    mem_limit: 512m
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - aegisops-net
+
+  promtail:
+    image: grafana/promtail:3.5.0
+    container_name: aegisops-promtail
+    restart: unless-stopped
+    command: ["-config.file=/etc/promtail/promtail.yml"]
+    volumes:
+      - ./monitoring/promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      - promtail-positions:/positions
+    mem_limit: 128m
+    depends_on: [loki, docker-proxy]
+    networks:
+      - aegisops-net
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    container_name: aegisops-grafana
+    restart: unless-stopped
+    environment:
+      GF_SERVER_ROOT_URL: https://grafana.${DOMAIN}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in infra/.env}
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # Single sign-on through Keycloak (PRD 8.1): the local login form is off, so there is no second password to manage.
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_OAUTH_AUTO_LOGIN: "true"
+      GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
+      GF_AUTH_GENERIC_OAUTH_NAME: AegisOps
+      GF_AUTH_GENERIC_OAUTH_CLIENT_ID: aegisops-grafana
+      GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: ${GRAFANA_OAUTH_SECRET:?set in infra/.env}
+      GF_AUTH_GENERIC_OAUTH_SCOPES: openid profile email
+      GF_AUTH_GENERIC_OAUTH_USE_PKCE: "true"
+      GF_AUTH_GENERIC_OAUTH_AUTH_URL: https://auth.${DOMAIN}/realms/aegisops/protocol/openid-connect/auth
+      GF_AUTH_GENERIC_OAUTH_TOKEN_URL: http://keycloak:8080/realms/aegisops/protocol/openid-connect/token
+      GF_AUTH_GENERIC_OAUTH_API_URL: http://keycloak:8080/realms/aegisops/protocol/openid-connect/userinfo
+      GF_AUTH_GENERIC_OAUTH_LOGIN_ATTRIBUTE_PATH: preferred_username
+      # Project isolation: Loki holds every project's logs, so Grafana is for operators and auditors only. A developer
+      # (or anyone with no matching role) is refused at login; developers see their own projects in the AegisOps dashboard.
+      GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH: "contains(roles[*], 'platform_admin') && 'Admin' || contains(roles[*], 'devops_engineer') && 'Editor' || contains(roles[*], 'auditor') && 'Viewer'"
+      GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT: "true"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    mem_limit: 512m
+    security_opt: ["no-new-privileges:true"]
+    depends_on: [prometheus, loki]
     networks:
       - aegisops-net
 

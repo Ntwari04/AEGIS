@@ -7,42 +7,74 @@
   "resetPasswordAllowed": true,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
-
   "passwordPolicy": "length(12) and notUsername",
-
   "bruteForceProtected": true,
   "permanentLockout": false,
   "failureFactor": 5,
   "waitIncrementSeconds": 60,
   "maxFailureWaitSeconds": 900,
   "maxDeltaTimeSeconds": 43200,
-
   "accessTokenLifespan": 900,
   "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 28800,
   "revokeRefreshToken": true,
   "refreshTokenMaxReuse": 0,
-
   "eventsEnabled": true,
-  "eventsListeners": ["jboss-logging"],
+  "eventsListeners": [
+    "jboss-logging"
+  ],
   "enabledEventTypes": [
-    "LOGIN", "LOGIN_ERROR", "LOGOUT", "LOGOUT_ERROR", "CODE_TO_TOKEN_ERROR", "REFRESH_TOKEN_ERROR",
-    "UPDATE_PASSWORD", "UPDATE_TOTP", "REMOVE_TOTP", "RESET_PASSWORD", "USER_DISABLED_BY_PERMANENT_LOCKOUT",
+    "LOGIN",
+    "LOGIN_ERROR",
+    "LOGOUT",
+    "LOGOUT_ERROR",
+    "CODE_TO_TOKEN_ERROR",
+    "REFRESH_TOKEN_ERROR",
+    "UPDATE_PASSWORD",
+    "UPDATE_TOTP",
+    "REMOVE_TOTP",
+    "RESET_PASSWORD",
+    "USER_DISABLED_BY_PERMANENT_LOCKOUT",
     "USER_DISABLED_BY_TEMPORARY_LOCKOUT"
   ],
   "adminEventsEnabled": true,
   "adminEventsDetailsEnabled": false,
-
   "roles": {
     "realm": [
-      { "name": "mfa_required", "description": "Marker role: holders must complete TOTP at login (FR-IAM-2). Do not assign directly; it is included in the privileged roles." },
-      { "name": "platform_admin", "description": "Full control", "composite": true, "composites": { "realm": ["mfa_required"] } },
-      { "name": "devops_engineer", "description": "Deploys and manages applications, servers, databases", "composite": true, "composites": { "realm": ["mfa_required"] } },
-      { "name": "developer", "description": "Sees and deploys own projects (non-production)" },
-      { "name": "auditor", "description": "Read-only, including the audit log" }
+      {
+        "name": "mfa_required",
+        "description": "Marker role: holders must complete TOTP at login (FR-IAM-2). Do not assign directly; it is included in the privileged roles."
+      },
+      {
+        "name": "platform_admin",
+        "description": "Full control",
+        "composite": true,
+        "composites": {
+          "realm": [
+            "mfa_required"
+          ]
+        }
+      },
+      {
+        "name": "devops_engineer",
+        "description": "Deploys and manages applications, servers, databases",
+        "composite": true,
+        "composites": {
+          "realm": [
+            "mfa_required"
+          ]
+        }
+      },
+      {
+        "name": "developer",
+        "description": "Sees and deploys own projects (non-production)"
+      },
+      {
+        "name": "auditor",
+        "description": "Read-only, including the audit log"
+      }
     ]
   },
-
   "browserFlow": "aegisops-browser",
   "authenticationFlows": [
     {
@@ -52,8 +84,20 @@
       "topLevel": true,
       "builtIn": false,
       "authenticationExecutions": [
-        { "authenticator": "auth-cookie", "authenticatorFlow": false, "requirement": "ALTERNATIVE", "priority": 10, "userSetupAllowed": false },
-        { "authenticatorFlow": true, "flowAlias": "aegisops-browser-forms", "requirement": "ALTERNATIVE", "priority": 20, "userSetupAllowed": false }
+        {
+          "authenticator": "auth-cookie",
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "flowAlias": "aegisops-browser-forms",
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "userSetupAllowed": false
+        }
       ]
     },
     {
@@ -62,8 +106,20 @@
       "topLevel": false,
       "builtIn": false,
       "authenticationExecutions": [
-        { "authenticator": "auth-username-password-form", "authenticatorFlow": false, "requirement": "REQUIRED", "priority": 10, "userSetupAllowed": false },
-        { "authenticatorFlow": true, "flowAlias": "aegisops-browser-mfa", "requirement": "CONDITIONAL", "priority": 20, "userSetupAllowed": false }
+        {
+          "authenticator": "auth-username-password-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "flowAlias": "aegisops-browser-mfa",
+          "requirement": "CONDITIONAL",
+          "priority": 20,
+          "userSetupAllowed": false
+        }
       ]
     },
     {
@@ -72,15 +128,33 @@
       "topLevel": false,
       "builtIn": false,
       "authenticationExecutions": [
-        { "authenticator": "conditional-user-role", "authenticatorFlow": false, "requirement": "REQUIRED", "priority": 10, "authenticatorConfig": "mfa-required-role", "userSetupAllowed": false },
-        { "authenticator": "auth-otp-form", "authenticatorFlow": false, "requirement": "REQUIRED", "priority": 20, "userSetupAllowed": false }
+        {
+          "authenticator": "conditional-user-role",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "authenticatorConfig": "mfa-required-role",
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "auth-otp-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": false
+        }
       ]
     }
   ],
   "authenticatorConfig": [
-    { "alias": "mfa-required-role", "config": { "condUserRole": "mfa_required", "negate": "false" } }
+    {
+      "alias": "mfa-required-role",
+      "config": {
+        "condUserRole": "mfa_required",
+        "negate": "false"
+      }
+    }
   ],
-
   "clients": [
     {
       "clientId": "aegisops-web",
@@ -93,14 +167,25 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
-      "redirectUris": ["${WEB_ORIGIN}/api/auth/callback/keycloak"],
-      "webOrigins": ["${WEB_ORIGIN}"],
+      "redirectUris": [
+        "${WEB_ORIGIN}/api/auth/callback/keycloak"
+      ],
+      "webOrigins": [
+        "${WEB_ORIGIN}"
+      ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "${WEB_ORIGIN}/*",
         "access.token.lifespan": "900"
       },
-      "defaultClientScopes": ["basic", "acr", "web-origins", "profile", "email", "roles"],
+      "defaultClientScopes": [
+        "basic",
+        "acr",
+        "web-origins",
+        "profile",
+        "email",
+        "roles"
+      ],
       "protocolMappers": [
         {
           "name": "aegisops-api-audience",
@@ -125,6 +210,53 @@
             "id.token.claim": "false",
             "access.token.claim": "true",
             "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "aegisops-grafana",
+      "name": "AegisOps Grafana",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "${GRAFANA_OAUTH_SECRET}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "${GRAFANA_ORIGIN}/login/generic_oauth"
+      ],
+      "webOrigins": [
+        "${GRAFANA_ORIGIN}"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "${GRAFANA_ORIGIN}/*",
+        "access.token.lifespan": "900"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "acr",
+        "web-origins",
+        "profile",
+        "email",
+        "roles"
+      ],
+      "protocolMappers": [
+        {
+          "name": "realm-roles-flat",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "roles",
+            "multivalued": "true",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
           }
         }
       ]

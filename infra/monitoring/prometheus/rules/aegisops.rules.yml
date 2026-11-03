@@ -1,0 +1,142 @@
+# Default alert rules (FR-MON-3). They ship with the platform; thresholds are config, change them here and reload Prometheus.
+# Labels `project` / `environment` (when known) are what the dashboard uses to attach an alert to a project (FR-DASH-1/4).
+groups:
+  - name: containers
+    rules:
+      # A managed container that should be running is stopped, crashed or gone. `expected_up` comes from the AegisOps API:
+      # one series per environment whose latest successful deployment owns a container.
+      - alert: ContainerDown
+        expr: aegisops_environment_expected_up unless on(name) (aegisops_container_up == 1)
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Container {{ $labels.name }} is down ({{ $labels.project }}/{{ $labels.environment }})"
+          description: "The container for {{ $labels.project }}/{{ $labels.environment }} has not been seen for over a minute."
+
+      # The platform's own containers. A container that is stopped OR removed is "not up", so this catches both.
+      - alert: PlatformContainerDown
+        # Parentheses matter: in PromQL `unless` binds tighter than `or`, so without them only the LAST name was checked.
+        expr: |
+          (
+          label_replace(vector(1), "name", "aegisops-postgres", "", "")
+            or label_replace(vector(1), "name", "aegisops-redis", "", "")
+            or label_replace(vector(1), "name", "aegisops-keycloak", "", "")
+            or label_replace(vector(1), "name", "aegisops-api", "", "")
+            or label_replace(vector(1), "name", "aegisops-web", "", "")
+            or label_replace(vector(1), "name", "aegisops-nginx", "", "")
+            or label_replace(vector(1), "name", "aegisops-deployer", "", "")
+          )
+          unless on(name) (aegisops_container_up == 1)
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Platform container {{ $labels.name }} is down"
+
+      - alert: ContainerRestarting
+        expr: aegisops_container_restarting == 1 or increase(aegisops_container_restart_count[10m]) > 3
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Container {{ $labels.name }} is restarting repeatedly"
+
+      - alert: ContainerHighMemory
+        expr: |
+          aegisops_container_memory_bytes / aegisops_container_memory_limit_bytes > 0.9
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Container {{ $labels.name }} is using over 90% of its memory limit"
+
+  - name: host
+    rules:
+      - alert: HostMemoryHigh
+        expr: 1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.90
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Host memory above 90% ({{ $value | humanizePercentage }})"
+
+      - alert: DiskUsageHigh
+        expr: |
+          1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|vfat|ramfs"}
+               / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|vfat|ramfs"}) > 0.85
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Disk {{ $labels.mountpoint }} above 85% ({{ $value | humanizePercentage }})"
+
+  - name: certificates
+    rules:
+      - alert: CertificateExpiringSoon
+        expr: (probe_ssl_earliest_cert_expiry - time()) < 14 * 86400
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "TLS certificate on {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
+
+      - alert: TlsProbeFailing
+        expr: probe_success{job="tls-expiry"} == 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Cannot probe the TLS listener {{ $labels.instance }}"
+
+  - name: security
+    rules:
+      # FR-MON-3 / PRD 8: repeated failed logins. Keycloak counts failed logins as event="login" with a non-empty error label (user_not_found, invalid_user_credentials, ...).
+      - alert: RepeatedFailedLogins
+        # The second branch covers a counter that first appears mid-burst: Keycloak creates it at the first failure, so
+        # increase() has no earlier sample and would miss exactly the first burst. A new counter is treated as starting at 0.
+        expr: |
+          sum(increase(keycloak_user_events_total{event="login", error!=""}[5m])) > 5
+            or
+          (sum(keycloak_user_events_total{event="login", error!=""}) - (sum(keycloak_user_events_total{event="login", error!=""} offset 5m) or vector(0))) > 5
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value | printf \"%.0f\" }} failed logins in the last 5 minutes"
+
+  - name: platform
+    rules:
+      - alert: ScrapeTargetDown
+        expr: up == 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Monitoring target {{ $labels.job }} ({{ $labels.instance }}) is not reachable"
+
+      - alert: ApiHighErrorRate
+        expr: |
+          sum(rate(aegisops_http_requests_total{status_class="5xx"}[5m]))
+            / clamp_min(sum(rate(aegisops_http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "More than 5% of API requests are failing with 5xx"
+
+      - alert: DeployQueueBacklog
+        expr: aegisops_deploy_queue_jobs{state="waiting"} > 5
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} deployments have been waiting for 10 minutes: is the deployer running?"
+
+      - alert: DeploymentFailed
+        expr: increase(aegisops_deployments_total{status=~"FAILED|ROLLED_BACK"}[10m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "A deployment of {{ $labels.project }}/{{ $labels.environment }} ended {{ $labels.status }}"
+
+  - name: backups
+    rules:
+      # FR-BACKUP-5. The backup job (Phase 5) publishes these; until it runs, neither series exists and nothing fires.
+      - alert: BackupFailed
+        expr: aegisops_backup_last_status == 0
+        labels: { severity: critical }
+        annotations:
+          summary: "The last backup job failed"
+
+      - alert: BackupStale
+        expr: time() - aegisops_backup_last_success_timestamp_seconds > 26 * 3600
+        labels: { severity: critical }
+        annotations:
+          summary: "No successful backup in the last 26 hours"

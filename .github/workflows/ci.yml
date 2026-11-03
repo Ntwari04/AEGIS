@@ -27,6 +27,32 @@ jobs:
       - name: Integration tests (real Postgres + real Keycloak via Testcontainers)
         run: pnpm --filter @aegisops/api test:integration
 
+  # Phase 4: the monitoring configuration is validated with the tools that will run it, and every default alert rule
+  # is unit-tested (promtool) so a wrong expression cannot ship silently.
+  monitoring-config:
+    runs-on: ubuntu-latest
+    env:
+      PROMETHEUS_IMAGE: prom/prometheus:v3.5.0
+      ALERTMANAGER_IMAGE: prom/alertmanager:v0.28.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prometheus config and rules are valid
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/infra/monitoring/prometheus:/etc/prometheus:ro" "$PROMETHEUS_IMAGE" check config /etc/prometheus/prometheus.yml
+      - name: Alert rule unit tests
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/infra/monitoring/prometheus:/p:ro" "$PROMETHEUS_IMAGE" test rules /p/tests/aegisops.rules.test.yml
+      - name: Alertmanager config renders and is valid (Slack, email and no channel)
+        run: |
+          render='sed "s#^exec .*#true#" /etc/alertmanager/entrypoint.sh > /tmp/e.sh && sh /tmp/e.sh && amtool check-config /tmp/alertmanager.yml'
+          docker run --rm -e ALERT_SLACK_WEBHOOK_URL=https://hooks.invalid/T/B/x -v "$PWD/infra/monitoring/alertmanager:/etc/alertmanager:ro" --entrypoint sh "$ALERTMANAGER_IMAGE" -c "$render"
+          docker run --rm -e ALERT_EMAIL_TO=ops@example.com -e ALERT_SMTP_HOST=smtp.example.com -e ALERT_SMTP_PASSWORD=x -v "$PWD/infra/monitoring/alertmanager:/etc/alertmanager:ro" --entrypoint sh "$ALERTMANAGER_IMAGE" -c "$render"
+          docker run --rm -v "$PWD/infra/monitoring/alertmanager:/etc/alertmanager:ro" --entrypoint sh "$ALERTMANAGER_IMAGE" -c "$render"
+      - name: Loki and Promtail configs are valid
+        run: |
+          docker run --rm -v "$PWD/infra/monitoring/loki:/c:ro" grafana/loki:3.5.0 -config.file=/c/loki.yml -verify-config
+          docker run --rm -v "$PWD/infra/monitoring/promtail:/c:ro" grafana/promtail:3.5.0 -config.file=/c/promtail.yml -check-syntax
+
   dependency-audit:
     runs-on: ubuntu-latest
     steps:

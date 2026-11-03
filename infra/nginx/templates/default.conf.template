@@ -34,7 +34,7 @@ server {
 
 server {
     listen 80;
-    server_name ${DOMAIN} www.${DOMAIN} auth.${DOMAIN};
+    server_name ${DOMAIN} www.${DOMAIN} auth.${DOMAIN} grafana.${DOMAIN};
     return 301 https://$host$request_uri;
 }
 
@@ -61,6 +61,10 @@ server {
     proxy_buffers 8 32k;
     proxy_busy_buffers_size 64k;
     large_client_header_buffers 4 32k;
+
+    # Prometheus metrics are for Prometheus, on the internal network only (FR-MON-1). Without this line the request
+    # would fall through to the web app; being explicit keeps it a hard 404 whatever the web app does.
+    location = /metrics { return 404; }
 
     location /api/v1/ {
         limit_req zone=api burst=40 nodelay;
@@ -119,4 +123,42 @@ server {
     }
 
     location / { return 404; }
+}
+
+# ---- Grafana (dashboards, logs) ----
+# Single sign-on through Keycloak (Grafana's own login form is disabled); only platform_admin, devops_engineer and
+# auditor roles are admitted (see GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH in docker-compose.yml).
+server {
+    listen 443 ssl http2;
+    server_name grafana.${DOMAIN};
+
+    ssl_certificate     /etc/nginx/certs/cert.pem;
+    ssl_certificate_key /etc/nginx/certs/key.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    set $grafana http://grafana:3000;
+
+    location = /metrics { return 404; }
+
+    location / {
+        proxy_pass $grafana;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffer_size 32k;
+        proxy_buffers 8 32k;
+    }
+
+    # Grafana Live (dashboard auto-refresh over WebSocket)
+    location /api/live/ {
+        proxy_pass $grafana;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }
 }

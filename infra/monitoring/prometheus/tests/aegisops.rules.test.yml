@@ -1,0 +1,275 @@
+# Unit tests for the default alert rules. Run with:
+#   docker run --rm --entrypoint promtool -v "$PWD/infra/monitoring/prometheus:/p:ro" prom/prometheus:v3.5.0 test rules /p/tests/aegisops.rules.test.yml
+# CI runs the same command. Each test feeds synthetic series and asserts EXACTLY which alerts fire.
+rule_files:
+  - ../rules/aegisops.rules.yml
+
+evaluation_interval: 15s
+
+tests:
+  # --- A managed container that stops (docker kill / crash) is reported after 1 minute --------------------------------
+  - name: ContainerDown fires for a stopped managed container, not before a minute
+    interval: 15s
+    input_series:
+      - series: 'aegisops_environment_expected_up{project="shop",environment="staging",name="c1"}'
+        values: '1x40'
+      - series: 'aegisops_container_up{project="shop",environment="staging",name="c1"}'
+        values: '1x10 0x30'   # up for 150s, then stopped
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ContainerDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ContainerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              project: shop
+              environment: staging
+              name: c1
+            exp_annotations:
+              summary: "Container c1 is down (shop/staging)"
+              description: "The container for shop/staging has not been seen for over a minute."
+
+  - name: ContainerDown fires when the container disappears entirely (removed)
+    interval: 15s
+    input_series:
+      - series: 'aegisops_environment_expected_up{project="shop",environment="staging",name="c1"}'
+        values: '1x40'
+      - series: 'aegisops_container_up{project="shop",environment="staging",name="c1"}'
+        values: '1x4 stale'    # the series vanishes (Prometheus writes a staleness marker)
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ContainerDown
+        exp_alerts:
+          - exp_labels: { severity: critical, project: shop, environment: staging, name: c1 }
+            exp_annotations:
+              summary: "Container c1 is down (shop/staging)"
+              description: "The container for shop/staging has not been seen for over a minute."
+
+  - name: ContainerDown stays quiet while the container is up, and for another environment's container
+    interval: 15s
+    input_series:
+      - series: 'aegisops_environment_expected_up{project="shop",environment="staging",name="c1"}'
+        values: '1x40'
+      - series: 'aegisops_container_up{project="shop",environment="staging",name="c1"}'
+        values: '1x40'
+      - series: 'aegisops_container_up{project="other",environment="staging",name="c9"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ContainerDown
+        exp_alerts: []
+
+  # --- Platform containers: ONLY the missing one fires (regression test for PromQL `unless` / `or` precedence) -----------
+  - name: PlatformContainerDown fires only for the container that is not up
+    interval: 15s
+    input_series:
+      - {series: 'aegisops_container_up{name="aegisops-postgres"}',  values: '1x40'}
+      - {series: 'aegisops_container_up{name="aegisops-redis"}',     values: '1x40'}
+      - {series: 'aegisops_container_up{name="aegisops-keycloak"}',  values: '1x40'}
+      - {series: 'aegisops_container_up{name="aegisops-api"}',       values: '1x40'}
+      - {series: 'aegisops_container_up{name="aegisops-web"}',       values: '1x40'}
+      - {series: 'aegisops_container_up{name="aegisops-nginx"}',     values: '0x40'}
+      - {series: 'aegisops_container_up{name="aegisops-deployer"}',  values: '1x40'}
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PlatformContainerDown
+        exp_alerts:
+          - exp_labels: { severity: critical, name: aegisops-nginx }
+            exp_annotations: { summary: "Platform container aegisops-nginx is down" }
+
+  - name: PlatformContainerDown is silent when everything is up
+    interval: 15s
+    input_series:
+      - {series: 'aegisops_container_up{name="aegisops-postgres"}',  values: '1x40'}
+      - {series: 'aegisops_container_up{name="aegisops-redis"}',     values: '1x40'}
+      - {series: 'aegisops_container_up{name="aegisops-keycloak"}',  values: '1x40'}
+      - {series: 'aegisops_container_up{name="aegisops-api"}',       values: '1x40'}
+      - {series: 'aegisops_container_up{name="aegisops-web"}',       values: '1x40'}
+      - {series: 'aegisops_container_up{name="aegisops-nginx"}',     values: '1x40'}
+      - {series: 'aegisops_container_up{name="aegisops-deployer"}',  values: '1x40'}
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PlatformContainerDown
+        exp_alerts: []
+
+  - name: PlatformContainerDown fires for every platform container that has vanished
+    interval: 15s
+    input_series:
+      - {series: 'aegisops_container_up{name="aegisops-postgres"}', values: '1x40'}
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PlatformContainerDown
+        exp_alerts:
+          - { exp_labels: { severity: critical, name: aegisops-redis },    exp_annotations: { summary: "Platform container aegisops-redis is down" } }
+          - { exp_labels: { severity: critical, name: aegisops-keycloak }, exp_annotations: { summary: "Platform container aegisops-keycloak is down" } }
+          - { exp_labels: { severity: critical, name: aegisops-api },      exp_annotations: { summary: "Platform container aegisops-api is down" } }
+          - { exp_labels: { severity: critical, name: aegisops-web },      exp_annotations: { summary: "Platform container aegisops-web is down" } }
+          - { exp_labels: { severity: critical, name: aegisops-nginx },    exp_annotations: { summary: "Platform container aegisops-nginx is down" } }
+          - { exp_labels: { severity: critical, name: aegisops-deployer }, exp_annotations: { summary: "Platform container aegisops-deployer is down" } }
+
+  # --- Resources ---------------------------------------------------------------------------------------------------
+  - name: HostMemoryHigh above 90 percent
+    interval: 1m
+    input_series:
+      - {series: 'node_memory_MemTotal_bytes',     values: '1000x20'}
+      - {series: 'node_memory_MemAvailable_bytes', values: '50x20'}     # 95% used
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HostMemoryHigh
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "Host memory above 90% (95%)" }
+
+  - name: HostMemoryHigh stays quiet at 80 percent
+    interval: 1m
+    input_series:
+      - {series: 'node_memory_MemTotal_bytes',     values: '1000x20'}
+      - {series: 'node_memory_MemAvailable_bytes', values: '200x20'}
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HostMemoryHigh
+        exp_alerts: []
+
+  - name: DiskUsageHigh above 85 percent, ignoring tmpfs
+    interval: 1m
+    input_series:
+      - {series: 'node_filesystem_size_bytes{mountpoint="/",fstype="ext4"}',  values: '1000x20'}
+      - {series: 'node_filesystem_avail_bytes{mountpoint="/",fstype="ext4"}', values: '100x20'}    # 90% used
+      - {series: 'node_filesystem_size_bytes{mountpoint="/run",fstype="tmpfs"}',  values: '1000x20'}
+      - {series: 'node_filesystem_avail_bytes{mountpoint="/run",fstype="tmpfs"}', values: '0x20'}  # full, but tmpfs
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: DiskUsageHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, mountpoint: "/", fstype: ext4 }
+            exp_annotations: { summary: "Disk / above 85% (90%)" }
+
+  - name: ContainerHighMemory only fires for containers that have a limit
+    interval: 1m
+    input_series:
+      - {series: 'aegisops_container_memory_bytes{name="a"}',        values: '95x20'}
+      - {series: 'aegisops_container_memory_limit_bytes{name="a"}',  values: '100x20'}
+      - {series: 'aegisops_container_memory_bytes{name="nolimit"}',  values: '99999x20'}
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ContainerHighMemory
+        exp_alerts:
+          - exp_labels: { severity: warning, name: a }
+            exp_annotations: { summary: "Container a is using over 90% of its memory limit" }
+
+  # --- Certificates ---------------------------------------------------------------------------------------------------
+  - name: CertificateExpiringSoon fires within 14 days
+    interval: 1m
+    input_series:
+      - {series: 'probe_ssl_earliest_cert_expiry{instance="nginx:443"}', values: '864000x30'}    # 10 days after t=0
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CertificateExpiringSoon
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "nginx:443" }
+            exp_annotations: { summary: "TLS certificate on nginx:443 expires in 9d 23h 40m 0s" }
+
+  - name: CertificateExpiringSoon stays quiet with 30 days left
+    interval: 1m
+    input_series:
+      - {series: 'probe_ssl_earliest_cert_expiry{instance="nginx:443"}', values: '2592000x30'}
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CertificateExpiringSoon
+        exp_alerts: []
+
+  # --- Security -------------------------------------------------------------------------------------------------------
+  - name: RepeatedFailedLogins fires on more than 5 login errors in 5 minutes
+    interval: 30s
+    input_series:
+      - {series: 'keycloak_user_events_total{event="login",error="invalid_user_credentials",realm="aegisops"}', values: '0+1x20'}    # one every 30s
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RepeatedFailedLogins
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "10 failed logins in the last 5 minutes" }
+
+  - name: RepeatedFailedLogins catches the FIRST burst, when the counter appears already at 7 (no earlier sample)
+    interval: 30s
+    input_series:
+      - {series: 'keycloak_user_events_total{event="login",error="user_not_found",realm="aegisops"}', values: '_x6 7x20'}
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RepeatedFailedLogins
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "7 failed logins in the last 5 minutes" }
+
+  - name: RepeatedFailedLogins ignores successful logins
+    interval: 30s
+    input_series:
+      - {series: 'keycloak_user_events_total{event="login",realm="aegisops"}', values: '0+1x20'}    # no error label: successes
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RepeatedFailedLogins
+        exp_alerts: []
+
+  - name: RepeatedFailedLogins stays quiet for the occasional typo
+    interval: 30s
+    input_series:
+      - {series: 'keycloak_user_events_total{event="login",error="invalid_user_credentials",realm="aegisops"}', values: '0x10 1x20'}
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: RepeatedFailedLogins
+        exp_alerts: []
+
+  # --- Platform -------------------------------------------------------------------------------------------------------
+  - name: DeploymentFailed fires when a rollback is recorded, with the project and environment
+    interval: 30s
+    input_series:
+      - {series: 'aegisops_deployments_total{project="shop",environment="staging",status="ROLLED_BACK"}', values: '0x4 1x20'}
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: DeploymentFailed
+        exp_alerts:
+          - exp_labels: { severity: warning, project: shop, environment: staging, status: ROLLED_BACK }
+            exp_annotations: { summary: "A deployment of shop/staging ended ROLLED_BACK" }
+
+  - name: ScrapeTargetDown after 2 minutes
+    interval: 15s
+    input_series:
+      - {series: 'up{job="aegisops-api",instance="api:4000"}', values: '1x4 0x40'}
+    alert_rule_test:
+      - eval_time: 1m30s
+        alertname: ScrapeTargetDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ScrapeTargetDown
+        exp_alerts:
+          - exp_labels: { severity: warning, job: aegisops-api, instance: "api:4000" }
+            exp_annotations: { summary: "Monitoring target aegisops-api (api:4000) is not reachable" }
+
+  # --- Backups (Phase 5 publishes these; absent series must never fire) ----------------------------------------------
+  - name: BackupFailed fires on a failed run, and nothing fires while the metric does not exist yet
+    interval: 1m
+    input_series:
+      - {series: 'aegisops_backup_last_status', values: '1x5 0x10'}
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: BackupFailed
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BackupFailed
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations: { summary: "The last backup job failed" }
+
+  - name: Backup alerts are silent when no backup metrics exist (Phase 5 not run yet)
+    interval: 1m
+    input_series:
+      - {series: 'up{job="x"}', values: '1x20'}
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BackupFailed
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BackupStale
+        exp_alerts: []
