@@ -34,3 +34,15 @@ button.link { background:none; color:var(--accent); margin:0; padding:0; }
 .check { display:flex; align-items:center; gap:8px; margin-top:12px; }
 .check input { width:auto; }
 mono, .mono { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:13px; }
+.state { font-size:12px; font-weight:600; border-radius:999px; padding:1px 8px; border:1px solid currentColor; color:var(--muted); }
+.state[data-state=up] { color:var(--good); }
+.state[data-state=down] { color:var(--bad); }
+.state[data-state=restarting] { color:var(--warn); }
+.sev { font-size:12px; font-weight:600; border-radius:4px; padding:0 6px; border:1px solid currentColor; color:var(--warn); }
+.sev[data-sev=critical] { color:var(--bad); }
+.alerts { margin:0; padding-left:0; list-style:none; font-size:13px; }
+.alerts li { margin:2px 0; }
+.stats { display:flex; gap:32px; margin-top:8px; flex-wrap:wrap; }
+.big { font-size:24px; font-weight:600; }
+.big[data-bad=true] { color:var(--bad); }
+.links a { white-space:nowrap; }
