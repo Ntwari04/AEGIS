@@ -1,0 +1,220 @@
+// AegisOps system-of-record (PRD Section 9).
+// Roles live in Keycloak (FR-IAM-3), so there is deliberately no Role table:
+// the role claim on the validated JWT is the source of truth on every request.
+
+generator client {
+  provider = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProjectMemberRole {
+  OWNER
+  MEMBER
+}
+
+enum DeploymentStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+  ROLLED_BACK
+}
+
+enum BackupStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
+enum AuditResult {
+  SUCCESS
+  DENIED
+  ERROR
+}
+
+/// Mirrors a Keycloak subject. Never holds credentials.
+model User {
+  id         String   @id @default(uuid())
+  keycloakId String   @unique
+  username   String
+  email      String?
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  memberships ProjectMember[]
+  apiKeys     ApiKey[]
+}
+
+model Project {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  description String?
+  /// "owner/repo". The GitHub App installation is linked in Phase 3.
+  githubRepo  String?
+  githubInstallationId String?
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members      ProjectMember[]
+  environments Environment[]
+  databases    Database[]
+  apiKeys      ApiKey[]
+}
+
+model ProjectMember {
+  projectId String
+  userId    String
+  role      ProjectMemberRole @default(MEMBER)
+  createdAt DateTime          @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+  @@index([userId])
+}
+
+model Server {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  role      String   @default("app")
+  ipAddress String?
+  cpuCores  Int?
+  memoryMb  Int?
+  createdAt DateTime @default(now())
+
+  environments Environment[]
+  containers   Container[]
+}
+
+model Environment {
+  id           String   @id @default(uuid())
+  projectId    String
+  name         String
+  isProduction Boolean  @default(false)
+  branch       String   @default("main")
+  domain       String?
+  serverId     String?
+  cpuLimit     Float?
+  memoryLimitMb Int?
+  /// Keys only. Values are secrets and are handled per FR-SEC-5 (Phase 3); never stored here in plaintext.
+  envVarNames  String[]
+  createdAt    DateTime @default(now())
+
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  server      Server?      @relation(fields: [serverId], references: [id])
+  deployments Deployment[]
+  containers  Container[]
+
+  @@unique([projectId, name])
+}
+
+model Container {
+  id            String   @id @default(uuid())
+  environmentId String
+  serverId      String?
+  dockerId      String?
+  name          String
+  image         String
+  createdAt     DateTime @default(now())
+
+  environment Environment @relation(fields: [environmentId], references: [id], onDelete: Cascade)
+  server      Server?     @relation(fields: [serverId], references: [id])
+}
+
+model Deployment {
+  id            String           @id @default(uuid())
+  environmentId String
+  triggeredById String?
+  commitSha     String?
+  imageRef      String?
+  status        DeploymentStatus @default(PENDING)
+  idempotencyKey String?         @unique
+  startedAt     DateTime         @default(now())
+  finishedAt    DateTime?
+
+  environment Environment @relation(fields: [environmentId], references: [id], onDelete: Cascade)
+
+  @@index([environmentId, startedAt])
+}
+
+/// Provisioned-database metadata, not Postgres itself.
+model Database {
+  id        String   @id @default(uuid())
+  projectId String
+  name      String
+  createdAt DateTime @default(now())
+
+  project Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  backups BackupJob[]
+
+  @@unique([projectId, name])
+}
+
+model BackupJob {
+  id         String       @id @default(uuid())
+  databaseId String
+  status     BackupStatus @default(PENDING)
+  sizeBytes  BigInt?
+  objectKey  String?
+  startedAt  DateTime     @default(now())
+  finishedAt DateTime?
+
+  database Database @relation(fields: [databaseId], references: [id], onDelete: Cascade)
+}
+
+model ApiKey {
+  id        String    @id @default(uuid())
+  name      String
+  /// SHA-256 of the key. The plaintext is shown exactly once at creation (FR-IAM-5).
+  keyHash   String    @unique
+  /// First characters of the key, so a human can tell keys apart without exposing it.
+  prefix    String
+  userId    String
+  projectId String
+  scopes    String[]
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+  lastUsedAt DateTime?
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+/// Append-only. A database trigger (see migration) rejects UPDATE and DELETE (FR-AUDIT-2).
+model AuditLogEntry {
+  id         String      @id @default(uuid())
+  createdAt  DateTime    @default(now())
+  actorId    String?
+  actorName  String?
+  action     String
+  targetType String?
+  targetId   String?
+  result     AuditResult
+  sourceIp   String?
+  /// Never contains secrets or request bodies; see AuditService.sanitize.
+  metadata   Json?
+
+  @@index([createdAt])
+  @@index([actorId])
+  @@index([action])
+}
+
+model AlertRule {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  expr      String
+  durationS Int      @default(60)
+  severity  String   @default("warning")
+  createdAt DateTime @default(now())
+}

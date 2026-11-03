@@ -1,0 +1,43 @@
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Length, Matches, Max, Min } from 'class-validator';
+import { Type } from 'class-transformer';
+
+const SLUG = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
+const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const DOMAIN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
+
+export class CreateProjectDto {
+  @IsString() @Length(2, 80) name!: string;
+  @Matches(SLUG, { message: 'slug must be lowercase letters, digits and hyphens' }) slug!: string;
+  @IsOptional() @IsString() @Length(0, 500) description?: string;
+  @IsOptional() @Matches(REPO, { message: 'githubRepo must look like owner/repo' }) githubRepo?: string;
+}
+
+export class UpdateProjectDto {
+  @IsOptional() @IsString() @Length(2, 80) name?: string;
+  @IsOptional() @IsString() @Length(0, 500) description?: string;
+  @IsOptional() @Matches(REPO, { message: 'githubRepo must look like owner/repo' }) githubRepo?: string;
+}
+
+export class PageQuery {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) page: number = 1;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) pageSize: number = 20;
+}
+
+export class AddMemberDto {
+  @IsString() @Length(1, 100) username!: string;
+  @IsOptional() @IsIn(['OWNER', 'MEMBER']) role?: 'OWNER' | 'MEMBER';
+}
+
+export class CreateEnvironmentDto {
+  @Matches(SLUG) name!: string;
+  @IsOptional() @IsBoolean() isProduction?: boolean;
+  @IsOptional() @IsString() @Length(1, 100) branch?: string;
+  @IsOptional() @Matches(DOMAIN, { message: 'domain must be a valid hostname' }) domain?: string;
+}
+
+export const API_KEY_SCOPES = ['deployments:trigger', 'deployments:read'] as const;
+
+export class CreateApiKeyDto {
+  @IsString() @Length(2, 80) name!: string;
+  @IsIn(API_KEY_SCOPES as unknown as string[], { each: true }) scopes!: string[];
+}
