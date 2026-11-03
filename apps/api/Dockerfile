@@ -5,7 +5,8 @@ WORKDIR /repo
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY packages/shared-types packages/shared-types
 COPY apps/api apps/api
-RUN pnpm install --frozen-lockfile --filter @aegisops/api... \
+# Cache mounts: the pnpm store and metadata survive failed or repeated builds (flaky registry), and never land in an image layer.
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store --mount=type=cache,target=/root/.cache/pnpm pnpm install --frozen-lockfile --filter @aegisops/api... \
  && pnpm --filter @aegisops/shared-types build \
  && pnpm --filter @aegisops/api build
 
