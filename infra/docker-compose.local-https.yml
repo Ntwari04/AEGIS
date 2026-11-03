@@ -13,3 +13,7 @@ services:
       # localtest.me resolves to 127.0.0.1 via public DNS, which inside the container is itself, not
       # the host. host-gateway routes auth.${DOMAIN} to the host, where Nginx publishes 443.
       - "auth.${DOMAIN}:host-gateway"
+  deployer:
+    # Docker Desktop exposes docker.sock as root:root (gid 0), not the host "docker" group.
+    # On the droplet DOCKER_GID (stat -c %g /var/run/docker.sock) is used instead.
+    group_add: ["0"]
