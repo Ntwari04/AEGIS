@@ -1,0 +1,15 @@
+# LOCAL ONLY. Never use on the droplet.
+# Runs the whole stack on your machine behind Nginx with DOMAIN=localtest.me and a self-signed cert:
+#   docker compose -f docker-compose.yml -f docker-compose.local-https.yml up -d
+#
+# The production file stays strict; these two settings exist only because of the local setup.
+services:
+  web:
+    environment:
+      # Nginx's cert for localtest.me is self-signed, so Node would reject Auth.js's server-side
+      # OIDC discovery/token calls. NEVER set this with a real certificate.
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
+    extra_hosts:
+      # localtest.me resolves to 127.0.0.1 via public DNS, which inside the container is itself, not
+      # the host. host-gateway routes auth.${DOMAIN} to the host, where Nginx publishes 443.
+      - "auth.${DOMAIN}:host-gateway"

@@ -96,3 +96,13 @@ it on the droplet. Then copy `apps/api/.env.example` → `apps/api/.env` and `ap
 ## Known gaps / follow-ups
 
 See "Implementation notes" at the end of `docs/PRD.md` for deviations from the spec.
+
+## Running the whole stack locally (HTTPS on localtest.me)
+
+```
+cd infra
+docker compose -f docker-compose.yml -f docker-compose.local-https.yml up -d
+```
+
+`docker-compose.local-https.yml` is local-only: it disables Node TLS verification and routes `auth.$DOMAIN`
+to the host for the web container, because the local Nginx cert is self-signed. It is never used on the droplet.
