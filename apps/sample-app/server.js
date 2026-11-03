@@ -20,3 +20,5 @@ http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(`AegisOps sample app, version ${VERSION}\n`);
 }).listen(PORT, '0.0.0.0', () => console.log(`listening on ${PORT} (version ${VERSION})`));
+
+// build marker: v1 (first live push-to-deploy)
