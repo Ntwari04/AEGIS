@@ -49,3 +49,22 @@ This is tested against real Docker and a real Nginx (`apps/api/test/deploy.int.t
 - Deploys are serialized (concurrency 1). Fine for v1.
 - The GitHub App key is not used yet (reserved for commit-status reporting); webhook auth is HMAC only.
 - Deployer holds the Docker socket (root-equivalent on the host). It is isolated: no ports, no HTTP, capabilities dropped, API never mounts it.
+
+## Verified live (local stack, 2026-11-03)
+
+Real GitHub push → GitHub Actions `Build image` → GHCR → `workflow_run` webhook through a temporary
+Cloudflare quick tunnel → deployer → health-gated swap behind Nginx over HTTPS:
+
+| Commit | Result |
+|---|---|
+| good build | `SUCCESS`; `https://staging.<domain>/healthz` 200 and served the exact commit |
+| `health.flag = broken` | `ROLLED_BACK` (`/healthz did not return 2xx in time`); the previous version kept serving throughout, the broken container was never routed; audited |
+| flag restored | `SUCCESS`; old container removed after the new one was routed |
+
+Findings fixed while doing it:
+- **Nginx default server:** without an explicit `default_server`, the first managed project route became the default for unknown
+  Hosts, so a request with an unrecognised Host was proxied to a project container. The template now has a catch-all that drops them (`return 444`).
+- **Docker Desktop socket:** the socket is `root:root` there, so the local override adds group 0 to the deployer (`docker-compose.local-https.yml`). On a
+  Linux droplet set `DOCKER_GID` to the socket's gid instead.
+- **Tunnel Host header:** a tunnel must present the dashboard host (`cloudflared ... --http-host-header <DOMAIN>`), otherwise Nginx drops the webhook.
+  On the droplet GitHub posts to `https://$DOMAIN/...`, so this only affects local testing.
