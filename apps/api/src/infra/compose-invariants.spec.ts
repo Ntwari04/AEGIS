@@ -12,13 +12,41 @@ describe('infra/docker-compose.yml security invariants (PRD 8.3, 8.6, 8.7)', () 
     expect(published).toEqual(['nginx']);
   });
 
-  it('only the deployer mounts the Docker socket (never api, web, nginx)', () => {
+  it('only the deployer and the read-only docker-proxy mount the Docker socket (never api, web, nginx, or any monitoring service)', () => {
     const mounting = Object.entries(compose.services)
       .filter(([, s]) => (s.volumes ?? []).some((v: string) => String(v).includes('docker.sock')))
       .map(([n]) => n);
-    expect(mounting).toEqual(['deployer']);
+    expect(mounting.sort()).toEqual(['deployer', 'docker-proxy']);
     expect(compose.services.deployer.ports).toBeUndefined();
     expect(compose.services.deployer.cap_drop).toContain('ALL');
+
+    // The proxy is how cAdvisor and Promtail see Docker: read-only mount, and no write (POST) or management API enabled.
+    const proxy = compose.services['docker-proxy'];
+    expect((proxy.volumes as string[]).find((v) => v.includes('docker.sock'))).toMatch(/:ro$/);
+    expect(proxy.ports).toBeUndefined();
+    expect(String(proxy.environment.POST)).toBe('0');
+    for (const k of ['IMAGES', 'VOLUMES', 'EXEC', 'SECRETS', 'SERVICES', 'BUILD', 'COMMIT', 'SYSTEM', 'AUTH']) {
+      expect(String(proxy.environment[k])).toBe('0');
+    }
+  });
+
+  it('monitoring services never publish ports and all join aegisops-net (reachable only internally or through Nginx)', () => {
+    for (const n of ['prometheus', 'alertmanager', 'loki', 'promtail', 'container-exporter', 'node-exporter', 'blackbox', 'grafana', 'docker-proxy']) {
+      expect(compose.services[n]).toBeDefined();
+      expect(compose.services[n].ports).toBeUndefined();
+      expect(compose.services[n].networks).toContain('aegisops-net');
+    }
+  });
+
+  it('Grafana: local login form off, anonymous off, SSO on with strict role mapping (developers are refused)', () => {
+    const env = compose.services.grafana.environment;
+    expect(env.GF_AUTH_DISABLE_LOGIN_FORM).toBe('true');
+    expect(env.GF_AUTH_ANONYMOUS_ENABLED).toBe('false');
+    expect(env.GF_USERS_ALLOW_SIGN_UP).toBe('false');
+    expect(env.GF_AUTH_GENERIC_OAUTH_ENABLED).toBe('true');
+    expect(env.GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT).toBe('true');
+    expect(env.GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH).not.toMatch(/developer/);
+    expect(env.GF_AUTH_GENERIC_OAUTH_USE_PKCE).toBe('true');
   });
 
   it('no service uses network_mode: host or privileged mode', () => {
@@ -32,7 +60,7 @@ describe('infra/docker-compose.yml security invariants (PRD 8.3, 8.6, 8.7)', () 
     const secretKey = /PASSWORD|SECRET|TOKEN|_KEY$/i;
     for (const [name, s] of Object.entries(compose.services)) {
       for (const [k, v] of Object.entries(s.environment ?? {})) {
-        if (secretKey.test(k) && !/^(true|false)$/.test(String(v))) {
+        if (secretKey.test(k) && !/_URL$/.test(k) && !/^(true|false|0|1)$/.test(String(v))) {
           expect({ name, k, ok: String(v).includes('${') }).toEqual({ name, k, ok: true });
         }
       }

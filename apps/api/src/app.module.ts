@@ -13,6 +13,8 @@ import { ProjectsModule } from './projects/projects.controller';
 import { ProjectAccessGuard } from './projects/project-access';
 import { DeploymentsModule } from './deployments/deployments.controller';
 import { SecretsModule } from './secrets/secrets.controller';
+import { MetricsModule } from './metrics/metrics.controller';
+import { MonitoringModule } from './monitoring/monitoring.controller';
 import { HealthModule } from './health/health.controller';
 import { AllExceptionsFilter } from './common/http-exception.filter';
 
@@ -34,6 +36,8 @@ class CoreModule {}
     ProjectsModule,
     DeploymentsModule,
     SecretsModule,
+    MetricsModule,
+    MonitoringModule,
     HealthModule,
   ],
   providers: [

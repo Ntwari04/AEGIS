@@ -19,6 +19,8 @@ export const DEPLOY_QUEUE = 'deployments';
 
 export interface DeploymentQueue {
   enqueue(deploymentId: string): Promise<void>;
+  /** Jobs per state, for the queue-depth metric (FR-MON-1). Optional so tests can stub the queue. */
+  counts?(): Promise<Record<string, number>>;
 }
 export const DEPLOYMENT_QUEUE = Symbol('DEPLOYMENT_QUEUE');
 
@@ -34,6 +36,9 @@ export class BullDeploymentQueue implements DeploymentQueue, OnModuleDestroy {
   async enqueue(deploymentId: string) {
     // jobId = deploymentId makes enqueueing idempotent.
     await this.queue.add('deploy', { deploymentId }, { jobId: deploymentId, removeOnComplete: 500, removeOnFail: 500, attempts: 1 });
+  }
+  counts() {
+    return this.queue.getJobCounts('waiting', 'active', 'delayed', 'failed', 'completed');
   }
   onModuleDestroy() {
     return this.queue.close();
@@ -280,6 +285,6 @@ export class CiController {
   imports: [ProjectsModule],
   controllers: [DeploymentsController, WebhooksController, CiController],
   providers: [DeploymentsService, { provide: DEPLOYMENT_QUEUE, useClass: BullDeploymentQueue }],
-  exports: [DeploymentsService],
+  exports: [DeploymentsService, DEPLOYMENT_QUEUE],
 })
 export class DeploymentsModule {}

@@ -53,3 +53,60 @@ export interface Paginated<T> {
 export interface ApiErrorBody {
   error: { code: string; message: string; details?: unknown };
 }
+
+// ---- Monitoring overview (FR-DASH-1..4) ----
+
+/** up / down / restarting for a running environment; none = nothing deployed yet; unknown = monitoring unreachable. */
+export type ContainerState = 'up' | 'down' | 'restarting' | 'none' | 'unknown';
+
+export interface AlertDto {
+  name: string;
+  severity: 'critical' | 'warning' | string;
+  summary: string;
+  since: string;
+  project?: string;
+  environment?: string;
+}
+
+export interface EnvironmentHealth {
+  id: string;
+  name: string;
+  isProduction: boolean;
+  deployment: { status: DeploymentStatus; commitSha: string | null; at: string } | null;
+  state: ContainerState;
+  container: string | null;
+  cpuCores: number | null;
+  memoryBytes: number | null;
+  memoryLimitBytes: number | null;
+  restarts1h: number | null;
+  uptimeSeconds: number | null;
+  alerts: AlertDto[];
+  /** Grafana links (FR-DASH-4). Omitted for roles that cannot open Grafana (developers). */
+  links?: { dashboard: string; logs: string };
+}
+
+export interface ProjectOverview {
+  id: string;
+  name: string;
+  slug: string;
+  githubRepo: string | null;
+  environments: EnvironmentHealth[];
+  openAlerts: number;
+}
+
+export interface PlatformSummary {
+  containersUp: number;
+  containersTotal: number;
+  hostMemoryUsed: number | null;
+  diskUsed: number | null;
+  alerts: AlertDto[];
+  links?: { dashboard: string };
+}
+
+export interface MonitoringOverview {
+  monitoring: 'ok' | 'unavailable';
+  generatedAt: string;
+  projects: ProjectOverview[];
+  /** Platform-wide roll-up: platform_admin and auditor only (FR-DASH-2). */
+  platform?: PlatformSummary;
+}

@@ -34,13 +34,20 @@ let kcUrl: string;
 let app: NestExpressApplication;
 let prisma: PrismaClient;
 const tokens: Record<string, string> = {};
+const monitoring = {
+  available: true,
+  up: 1,
+  alerts: [{ name: 'HostMemoryHigh', severity: 'warning', summary: 'Host memory above 90%', since: new Date().toISOString() }] as any[],
+};
 const enqueued: string[] = [];
 const WH_SECRET = 'integration-webhook-secret';
 
 function realmForTests() {
   const raw = readFileSync(join(__dirname, '../../../infra/keycloak/realm-aegisops.json'), 'utf8')
     .replace(/\$\{KEYCLOAK_CLIENT_SECRET\}/g, CLIENT_SECRET)
-    .replace(/\$\{WEB_ORIGIN\}/g, 'http://localhost:13000');
+    .replace(/\$\{WEB_ORIGIN\}/g, 'http://localhost:13000')
+    .replace(/\$\{GRAFANA_OAUTH_SECRET\}/g, 'grafana-test-secret')
+    .replace(/\$\{GRAFANA_ORIGIN\}/g, 'https://grafana.test.example');
   const realm = JSON.parse(raw);
   // Test-only differences: password grant so we can mint real tokens without a browser, plus seeded users.
   realm.clients[0].directAccessGrantsEnabled = true;
@@ -96,15 +103,27 @@ beforeAll(async () => {
     KEYCLOAK_AUDIENCE: 'aegisops-api',
     GITHUB_WEBHOOK_SECRET: WH_SECRET,
     SECRETS_ENCRYPTION_KEY: randomBytes(32).toString('base64'),
+    GRAFANA_PUBLIC_URL: 'https://grafana.test.example',
   });
 
   const { AppModule } = await import('../src/app.module');
   const { configureApp } = await import('../src/configure-app');
   const { DEPLOYMENT_QUEUE } = await import('../src/deployments/deployments.controller');
   const { GITHUB_APP } = await import('../src/github/github-app');
+  const { MonitoringClient } = await import('../src/monitoring/monitoring.controller');
   const mod = await Test.createTestingModule({ imports: [AppModule] })
     // The GitHub App is installed on every repository except acme/not-installed.
     .overrideProvider(GITHUB_APP).useValue({ repoAccessible: async (repo: string) => repo !== 'acme/not-installed' })
+    .overrideProvider(MonitoringClient).useValue({
+      get configured() { return true; },
+      containerSamples: async () => {
+        if (!monitoring.available) throw new Error('prometheus down');
+        const m = (value: number) => [{ metric: { name: 'dash-a-live', project: 'dash-a', environment: 'staging' }, value }];
+        return { up: m(monitoring.up), restarting: m(0), cpu: m(0.1), memory: m(1_000_000), memoryLimit: [], restarts1h: m(0), started: m(Date.now() / 1000 - 60) };
+      },
+      platformSummary: async () => ({ containersUp: 17, containersTotal: 17, hostMemoryUsed: 0.4, diskUsed: 0.5 }),
+      alerts: async () => monitoring.alerts,
+    })
     .overrideProvider(DEPLOYMENT_QUEUE).useValue({ enqueue: async (id: string) => void enqueued.push(id) })
     .compile();
   app = mod.createNestApplication<NestExpressApplication>({ rawBody: true });
@@ -614,5 +633,148 @@ describe('API-key deployments for CI (FR-IAM-5)', () => {
     await http().get('/api/v1/projects').set('Authorization', `Bearer ${key}`).expect(401);
     await http().get('/api/v1/projects').set('X-API-Key', key).expect(401);
     await http().put(`/api/v1/projects/${projectId}/environments/x/secrets/A`).set('X-API-Key', key).send({ value: 'v' }).expect(401);
+  });
+});
+
+describe('Prometheus metrics (FR-MON-1)', () => {
+  let projectId: string;
+  let envId: string;
+
+  beforeAll(async () => {
+    projectId = (await http().post('/api/v1/projects').set(as('it-devops')).send({ name: 'Metrics', slug: 'metrics-proj' }).expect(201)).body.id;
+    envId = (await http().post(`/api/v1/projects/${projectId}/environments`).set(as('it-devops')).send({ name: 'staging' }).expect(201)).body.id;
+    const now = new Date();
+    // an older success, a newer success (the live one), and a failure
+    await prisma.deployment.create({ data: { environmentId: envId, status: 'SUCCESS', containerName: 'old-container', commitSha: 'a'.repeat(40), finishedAt: new Date(now.getTime() - 60_000) } });
+    await prisma.deployment.create({ data: { environmentId: envId, status: 'SUCCESS', containerName: 'live-container', commitSha: 'b'.repeat(40), finishedAt: now } });
+    await prisma.deployment.create({ data: { environmentId: envId, status: 'ROLLED_BACK', commitSha: 'c'.repeat(40), finishedAt: now } });
+  });
+
+  const scrape = async () => (await http().get('/metrics').expect(200)).text as string;
+
+  it('serves Prometheus text format at /metrics, and not under the public /api/v1 prefix', async () => {
+    const res = await http().get('/metrics').expect(200);
+    expect(res.headers['content-type']).toMatch(/text\/plain/);
+    expect(res.text).toContain('# TYPE aegisops_http_requests_total counter');
+    expect(res.text).toContain('aegisops_http_request_duration_seconds_bucket');
+    expect(res.text).toContain('aegisops_process_cpu_user_seconds_total');
+    await http().get('/api/v1/metrics').expect(404);
+  });
+
+  it('counts requests by route PATTERN and status class, never by raw URL or user', async () => {
+    await http().get(`/api/v1/projects/${projectId}`).set(as('it-devops')).expect(200);
+    await http().get('/api/v1/projects').expect(401);
+    const text = await scrape();
+    expect(text).toMatch(/aegisops_http_requests_total\{method="GET",route="\/api\/v1\/projects\/:projectId",status_class="2xx"\} \d+/);
+    expect(text).toMatch(/status_class="4xx"/);
+    expect(text).not.toContain(projectId);
+    expect(text).not.toContain('it-devops');
+    expect(text).not.toContain(tokens['it-devops']);
+  });
+
+  it('reports one expected container per environment: the newest successful deployment', async () => {
+    const text = await scrape();
+    expect(text).toContain('aegisops_environment_expected_up{project="metrics-proj",environment="staging",name="live-container"} 1');
+    expect(text).not.toContain('old-container');
+  });
+
+  it('reports deployment counts by outcome (used by the DeploymentFailed alert)', async () => {
+    const text = await scrape();
+    expect(text).toContain('aegisops_deployments_total{project="metrics-proj",environment="staging",status="SUCCESS"} 2');
+    expect(text).toContain('aegisops_deployments_total{project="metrics-proj",environment="staging",status="ROLLED_BACK"} 1');
+  });
+
+  it('exposes queue depth series (empty when the queue stub has no counts)', async () => {
+    const text = await scrape();
+    expect(text).toContain('# TYPE aegisops_deploy_queue_jobs gauge');
+  });
+});
+
+describe('monitoring overview: visibility, links and degradation (FR-DASH-1..4)', () => {
+  let aId: string;
+  let bId: string;
+  let aStaging: string;
+
+  beforeAll(async () => {
+    aId = (await http().post('/api/v1/projects').set(as('it-devops')).send({ name: 'Dash A', slug: 'dash-a' }).expect(201)).body.id;
+    bId = (await http().post('/api/v1/projects').set(as('it-admin')).send({ name: 'Dash B', slug: 'dash-b' }).expect(201)).body.id;
+    aStaging = (await http().post(`/api/v1/projects/${aId}/environments`).set(as('it-devops')).send({ name: 'staging' }).expect(201)).body.id;
+    await http().post(`/api/v1/projects/${bId}/environments`).set(as('it-admin')).send({ name: 'staging' }).expect(201);
+    await http().post(`/api/v1/projects/${aId}/members`).set(as('it-devops')).send({ username: 'it-dev-a' }).expect(201);
+    // project A staging has a live container; project B none
+    await prisma.deployment.create({ data: { environmentId: aStaging, status: 'SUCCESS', containerName: 'dash-a-live', commitSha: 'a'.repeat(40), finishedAt: new Date() } });
+    monitoring.available = true;
+    monitoring.up = 1;
+  });
+
+  const overview = (user: string) => http().get('/api/v1/monitoring/overview').set(as(user));
+  const names = (body: any) => body.projects.map((p: any) => p.slug).filter((s: string) => s.startsWith('dash-')).sort();
+
+  it('a developer sees only the projects they are a member of, with no platform roll-up and no Grafana links', async () => {
+    const res = await overview('it-dev-a').expect(200);
+    expect(names(res.body)).toEqual(['dash-a']);
+    expect(res.body.platform).toBeUndefined();
+    const env = res.body.projects.find((p: any) => p.slug === 'dash-a').environments[0];
+    expect(env.links).toBeUndefined(); // Grafana refuses developers, so no dead links
+    expect(env).toMatchObject({ name: 'staging', state: 'up', container: 'dash-a-live' });
+    expect(env.deployment.status).toBe('SUCCESS');
+  });
+
+  it('a non-member developer sees none of these projects, and receives no alerts about them', async () => {
+    const res = await overview('it-dev-b').expect(200);
+    expect(names(res.body)).toEqual([]);
+    expect(JSON.stringify(res.body)).not.toContain('dash-a');
+    expect(JSON.stringify(res.body)).not.toContain('HostMemoryHigh'); // platform alerts are for platform roles only
+  });
+
+  it('the auditor and platform admin see every project and the platform roll-up; links point at the right dashboards', async () => {
+    for (const u of ['it-auditor', 'it-admin']) {
+      const res = await overview(u).expect(200);
+      expect(names(res.body)).toEqual(['dash-a', 'dash-b']);
+      expect(res.body.platform).toMatchObject({ containersUp: 17, containersTotal: 17 });
+      expect(res.body.platform.alerts.map((a: any) => a.name)).toContain('HostMemoryHigh');
+      expect(res.body.platform.links.dashboard).toBe('https://grafana.test.example/d/aegisops-platform');
+      const env = res.body.projects.find((p: any) => p.slug === 'dash-a').environments[0];
+      expect(env.links.dashboard).toContain('var-project=dash-a&var-environment=staging');
+    }
+  });
+
+  it('a devops engineer sees their projects with links but not the platform roll-up', async () => {
+    const res = await overview('it-devops').expect(200);
+    expect(res.body.platform).toBeUndefined();
+    expect(res.body.projects.find((p: any) => p.slug === 'dash-a').environments[0].links.logs).toContain('/explore?');
+  });
+
+  it('a crashed container is reported down, and its alert appears on that environment only', async () => {
+    monitoring.up = 0;
+    monitoring.alerts = [{ name: 'ContainerDown', severity: 'critical', summary: 'Container dash-a-live is down (dash-a/staging)', since: new Date().toISOString(), project: 'dash-a', environment: 'staging' }];
+    try {
+      const mine = (await overview('it-dev-a').expect(200)).body.projects.find((p: any) => p.slug === 'dash-a');
+      expect(mine.environments[0].state).toBe('down');
+      expect(mine.environments[0].alerts.map((a: any) => a.name)).toEqual(['ContainerDown']);
+      expect(mine.openAlerts).toBe(1);
+      // another project's owner is told nothing about it
+      expect(JSON.stringify((await overview('it-dev-b').expect(200)).body)).not.toContain('ContainerDown');
+    } finally {
+      monitoring.up = 1;
+      monitoring.alerts = [{ name: 'HostMemoryHigh', severity: 'warning', summary: 'Host memory above 90%', since: new Date().toISOString() }];
+    }
+  });
+
+  it('degrades to unknown (never a false "up") when Prometheus is unreachable, and still answers 200 with deployment state', async () => {
+    monitoring.available = false;
+    try {
+      const res = await overview('it-dev-a').expect(200);
+      expect(res.body.monitoring).toBe('unavailable');
+      const env = res.body.projects.find((p: any) => p.slug === 'dash-a').environments[0];
+      expect(env.state).toBe('unknown');
+      expect(env.deployment.status).toBe('SUCCESS');
+    } finally {
+      monitoring.available = true;
+    }
+  });
+
+  it('requires authentication', async () => {
+    await http().get('/api/v1/monitoring/overview').expect(401);
   });
 });
