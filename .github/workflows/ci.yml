@@ -58,7 +58,7 @@ jobs:
       - name: Build ${{ matrix.app }} image
         run: docker build -f apps/${{ matrix.app }}/Dockerfile --target runtime -t aegisops-${{ matrix.app }}:ci .
       - name: Trivy scan (HIGH/CRITICAL fails the build)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: aegisops-${{ matrix.app }}:ci
           severity: HIGH,CRITICAL
