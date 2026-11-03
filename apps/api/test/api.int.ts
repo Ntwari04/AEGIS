@@ -171,7 +171,7 @@ describe('role + project authorization with real data (PRD 8.2, 12)', () => {
 
   it('a devops engineer creates a project and becomes its OWNER', async () => {
     const res = await http().post('/api/v1/projects').set(as('it-devops'))
-      .send({ name: 'Billing', slug: 'billing', githubRepo: 'inclusivity/billing' }).expect(201);
+      .send({ name: 'Billing', slug: 'billing', githubRepo: 'example-org/billing' }).expect(201);
     projectId = res.body.id;
     const owner = await prisma.projectMember.findFirst({ where: { projectId }, include: { user: true } });
     expect(owner?.role).toBe('OWNER');

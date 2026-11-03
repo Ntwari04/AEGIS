@@ -37,7 +37,7 @@ export default async function NewProject({ searchParams }: { searchParams: Promi
         <label htmlFor="slug">Slug (lowercase letters, digits, hyphens)</label>
         <input id="slug" name="slug" required pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" maxLength={40} />
         <label htmlFor="githubRepo">GitHub repository (owner/repo, optional)</label>
-        <input id="githubRepo" name="githubRepo" placeholder="inclusivity/example" />
+        <input id="githubRepo" name="githubRepo" placeholder="example-org/example" />
         <label htmlFor="description">Description (optional)</label>
         <textarea id="description" name="description" rows={3} maxLength={500} />
         <button data-testid="create-project">Create project</button>

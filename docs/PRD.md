@@ -5,7 +5,7 @@
 | **Status** | Draft v1.0 |
 | **Author** | Ntwari Enock, with Claude |
 | **Date** | November 3, 2026 |
-| **Owner org** | Inclusivity Solutions |
+| **Owner org** | (the operating organization) |
 | **Related docs** | `AegisOps_Stakeholder_Review_v1.1.docx` (vision/business case) · `docs/phase1-infrastructure-setup.md` (infrastructure foundation, already built) |
 
 This PRD turns the AegisOps Stakeholder Proposal into a buildable specification. The proposal established *why* AegisOps should exist and the cost envelope; this document defines *what* gets built, in what order, and — because this platform will sit in front of operationally and potentially customer-sensitive systems — *how it stays secure*.
@@ -16,7 +16,7 @@ I'm flagging up front: this PRD makes several concrete technology choices (Node.
 
 ## 1. Purpose & Background
 
-Inclusivity Solutions currently has no single system for deploying, monitoring, and governing its infrastructure and applications. AegisOps centralizes that: one dashboard to deploy, observe, and manage every digital product the company runs, built entirely on open-source, self-hostable components to keep licensing cost at zero and keep the company in control of its own operational data.
+The organization currently has no single system for deploying, monitoring, and governing its infrastructure and applications. AegisOps centralizes that: one dashboard to deploy, observe, and manage every digital product the company runs, built entirely on open-source, self-hostable components to keep licensing cost at zero and keep the organization in control of its own operational data.
 
 Phase 1 (Infrastructure Foundation) is already built: a hardened DigitalOcean droplet, Cloudflare in front of it, Docker, and an Nginx reverse proxy. This PRD covers everything that runs on top of that foundation — the AegisOps application itself.
 
@@ -34,7 +34,7 @@ Phase 1 (Infrastructure Foundation) is already built: a hardened DigitalOcean dr
 - Billing/cost-allocation reporting across hosted products.
 - A public plugin/extension marketplace for third parties.
 - Supporting Kubernetes. v1 is Docker + Docker Compose on one or a small fixed set of droplets; a K8s backend is a plausible Phase 6+ direction, not in scope here.
-- Building a general-purpose PaaS for arbitrary customers — AegisOps is an internal tool for Inclusivity Solutions' own products.
+- Building a general-purpose PaaS for arbitrary customers — AegisOps is an internal tool for the operating organization's own products.
 
 ## 4. Users & Personas
 
@@ -197,7 +197,7 @@ This section is the one you asked not to skip, so it's deliberately the most det
 ### 8.4 Data protection
 - TLS everywhere in transit: already enforced edge-to-origin by Phase 1 (Cloudflare Full-strict + Nginx origin cert); extend the same expectation to service-to-service traffic that leaves the Docker network (it doesn't need to for this architecture, since Postgres/Redis/Keycloak all stay on the internal `aegisops-net` and are never port-published to the host — keep it that way).
 - Encryption at rest for the Postgres data volume and for backup archives (FR-BACKUP-2).
-- PII/sensitive-field handling: if any hosted project's data AegisOps touches includes personal or insurance-related data, treat that data with field-level care (don't log it, don't include it in error messages or audit-log "before/after" diffs) — I don't have enough information about which specific regulatory regimes apply (likely a mix depending on which countries Inclusivity Solutions' client base sits in) to assert a specific compliance framework here; have this reviewed by whoever owns legal/compliance before launch, rather than assuming general good practice is sufficient.
+- PII/sensitive-field handling: if any hosted project's data AegisOps touches includes personal or insurance-related data, treat that data with field-level care (don't log it, don't include it in error messages or audit-log "before/after" diffs) — I don't have enough information about which specific regulatory regimes apply (likely a mix depending on which countries the organization's client base sits in) to assert a specific compliance framework here; have this reviewed by whoever owns legal/compliance before launch, rather than assuming general good practice is sufficient.
 
 ### 8.5 Application security (OWASP-aligned)
 - Input validation on every API boundary (NestJS `class-validator` DTOs) — reject, don't sanitize-and-hope.
@@ -245,7 +245,7 @@ Core entities: `User` (mirrors Keycloak subject, not the password), `Role`, `Pro
 
 - Unit tests for business logic (especially authorization guards — these are exactly the kind of code where a regression is a security incident, not just a bug).
 - Integration tests against a real (containerized) Postgres/Redis/Keycloak, not mocks, for anything touching auth or data integrity.
-- End-to-end tests (Playwright — consistent with tooling already used elsewhere at Inclusivity Solutions) covering: login → view dashboard → create project → trigger deploy → see it go healthy → view its logs/metrics → trigger backup → roll back a deployment. This is the literal "does it work end to end" checklist handed to Claude Code in the companion build prompt.
+- End-to-end tests (Playwright) covering: login → view dashboard → create project → trigger deploy → see it go healthy → view its logs/metrics → trigger backup → roll back a deployment. This is the literal "does it work end to end" checklist handed to Claude Code in the companion build prompt.
 - A security-focused test pass: attempt cross-project access as a `developer`, attempt a privileged action as an `auditor`, confirm both are denied and logged.
 
 ## 13. Success Metrics

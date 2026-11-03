@@ -46,7 +46,7 @@ test('platform admin: redirected to Keycloak, enrols TOTP, lands authenticated, 
   await page.getByTestId('new-project').click();
   await page.locator('#name').fill('E2E Project');
   await page.locator('#slug').fill(slug);
-  await page.locator('#githubRepo').fill('inclusivity/e2e-demo');
+  await page.locator('#githubRepo').fill('example-org/e2e-demo');
   await page.getByTestId('create-project').click();
   await expect(page.getByTestId('project-name')).toHaveText('E2E Project');
 
