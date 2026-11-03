@@ -89,3 +89,16 @@ Findings fixed while doing it:
   Linux droplet set `DOCKER_GID` to the socket's gid instead.
 - **Tunnel Host header:** a tunnel must present the dashboard host (`cloudflared ... --http-host-header <DOMAIN>`), otherwise Nginx drops the webhook.
   On the droplet GitHub posts to `https://$DOMAIN/...`, so this only affects local testing.
+
+### Verified live, second round: secrets, GitHub App, logs (2026-11-03)
+
+- **Secrets:** set `DEMO_TOKEN` from the dashboard; the database holds only ciphertext, the deployer injected it into the running container
+  (confirmed in the container environment), the deployment log says `injecting 1 secret environment variable(s)` and never the name or value,
+  and the audit log records `secret.set` by the actor with the secret name only.
+- **GitHub App:** the installation token works against the real API; a project can be linked only to a repository the installation covers
+  (`octocat/Hello-World`, a public repo the App is not installed on, is refused, which a plain `GET /repos/...` check would have let through).
+  A manual deploy appeared in the repository's Deployments as `aegisops-deploy[bot]`, `in_progress` then `success`, with the environment URL and a link
+  to the deployment's log page in the dashboard.
+- **Logs:** each deployment has its own page with the step log and failure reason.
+- **Image builds:** the pnpm install step needs the npm registry; with a slow registry it can time out. The Dockerfiles use BuildKit cache
+  mounts, so a retry resumes from what was already downloaded.
