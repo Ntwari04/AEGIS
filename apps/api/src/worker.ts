@@ -10,12 +10,14 @@ import { AuditService } from './audit/audit.service';
 import { DeployEngine, DEFAULT_ENGINE_OPTIONS } from './deployments/deploy-engine';
 import { DockerodeOps, NginxRouter } from './deployments/docker-ops';
 import { DEPLOY_QUEUE } from './deployments/deployments.controller';
+import { SecretsService } from './secrets/secrets.service';
+import { GitHubApp, GitHubDeployReporter } from './github/github-app';
 
 @Global()
 @Module({ providers: [{ provide: APP_ENV, useFactory: (): AppEnv => loadEnv() }], exports: [APP_ENV] })
 class WorkerCoreModule {}
 
-@Module({ imports: [WorkerCoreModule, PrismaModule, AuditModule] })
+@Module({ imports: [WorkerCoreModule, PrismaModule, AuditModule], providers: [SecretsService] })
 class WorkerModule {}
 
 /**
@@ -33,12 +35,17 @@ async function main() {
   const ghcrToken = process.env.GHCR_TOKEN;
   const ops = new DockerodeOps(docker, ghcrUser && ghcrToken ? { username: ghcrUser, password: ghcrToken, serveraddress: 'ghcr.io' } : undefined);
   const router = new NginxRouter(docker, process.env.NGINX_CONF_DIR ?? '/nginx-conf.d', process.env.NGINX_CONTAINER ?? 'aegisops-nginx');
+  const secrets = app.get(SecretsService);
+  if (!secrets.isConfigured()) console.warn('SECRETS_ENCRYPTION_KEY is not set: deployments with stored secrets will fail');
+  const ghApp = GitHubApp.fromEnv();
+  if (!ghApp) console.warn('GitHub App not configured: deployment status will not be reported to GitHub');
   const engine = new DeployEngine(prisma, audit, ops, router, {
     ...DEFAULT_ENGINE_OPTIONS,
     network: process.env.DOCKER_NETWORK ?? 'aegisops-net',
     healthTimeoutMs: Number(process.env.HEALTH_TIMEOUT_MS ?? 60_000),
     nginxContainer: process.env.NGINX_CONTAINER ?? 'aegisops-nginx',
-  });
+    webOrigin: env.webOrigin,
+  }, secrets, ghApp ? new GitHubDeployReporter(ghApp, (m) => console.warn(m)) : undefined);
 
   // A deployment left RUNNING by a crashed worker can never finish; fail it so history is honest.
   await prisma.deployment.updateMany({

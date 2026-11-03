@@ -119,6 +119,13 @@ services:
       KEYCLOAK_AUDIENCE: aegisops-api
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?set in infra/.env}
       GITHUB_DEPLOY_WORKFLOW: ${GITHUB_DEPLOY_WORKFLOW:-Build image}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-0}
+      GITHUB_INSTALLATION_ID: ${GITHUB_INSTALLATION_ID:-0}
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/aegis/github-app.pem   # ./secrets/ is mounted read-only below
+      # AES-256-GCM key for per-environment secret values: openssl rand -base64 32. Empty = secret storage disabled (fails closed).
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
+    volumes:
+      - ./secrets:/run/secrets/aegis:ro   # GitHub App private key (gitignored, never baked into an image)
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -154,7 +161,13 @@ services:
       DOCKER_NETWORK: aegisops-net
       GHCR_USERNAME: ${GHCR_USERNAME:-}
       GHCR_TOKEN: ${GHCR_TOKEN:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-0}
+      GITHUB_INSTALLATION_ID: ${GITHUB_INSTALLATION_ID:-0}
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/aegis/github-app.pem   # ./secrets/ is mounted read-only below
+      # AES-256-GCM key for per-environment secret values: openssl rand -base64 32. Empty = secret storage disabled (fails closed).
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
     volumes:
+      - ./secrets:/run/secrets/aegis:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - ./nginx/conf.d/managed:/nginx-managed   # chown 1000:1000 on the host; Nginx includes *.conf from here
     depends_on:

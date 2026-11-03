@@ -1,4 +1,4 @@
-import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Length, Matches, Max, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, Length, Matches, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 
 const SLUG = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
@@ -35,6 +35,8 @@ export class CreateEnvironmentDto {
   @IsOptional() @Matches(DOMAIN, { message: 'domain must be a valid hostname' }) domain?: string;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(65535) containerPort?: number;
   @IsOptional() @Matches(/^\/[A-Za-z0-9\/._~-]{0,100}$/, { message: 'healthPath must start with /' }) healthPath?: string;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(64) @Max(65536) memoryLimitMb?: number;
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0.1) @Max(64) cpuLimit?: number;
   @IsOptional() @Matches(/^[a-z0-9.-]+(:[0-9]+)?(\/[a-z0-9._-]+)+$/, { message: 'imageRepo must be a lowercase registry path, no tag' }) imageRepo?: string;
 }
 

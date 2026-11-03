@@ -1,6 +1,6 @@
 import {
-  Body, ConflictException, Controller, Delete, ForbiddenException, Get, HttpCode, Module,
-  NotFoundException, Param, Patch, Post, Query,
+  BadGatewayException, BadRequestException, Body, ConflictException, Controller, Delete, ForbiddenException, Get, HttpCode, Module,
+  Inject, NotFoundException, Param, Patch, Post, Query,
 } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
@@ -12,6 +12,7 @@ import {
   AddMemberDto, CreateApiKeyDto, CreateEnvironmentDto, CreateProjectDto, PageQuery, UpdateProjectDto,
 } from './projects.dto';
 import { ProjectAccessGuard, ProjectAccessService } from './project-access';
+import { GITHUB_APP, GitHubApp } from '../github/github-app';
 
 const ALL_ROLES = ['platform_admin', 'devops_engineer', 'developer', 'auditor'] as const;
 
@@ -21,12 +22,25 @@ function isUniqueViolation(e: unknown) {
 
 @Controller('projects')
 export class ProjectsController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, @Inject(GITHUB_APP) private readonly github: GitHubApp | null) {}
+
+  /** FR-PROJ-2: a project may only be linked to a repository the GitHub App is installed on. Skipped when no App is configured. */
+  private async assertRepoLinkable(repo?: string) {
+    if (!repo || !this.github) return;
+    let ok: boolean;
+    try {
+      ok = await this.github.repoAccessible(repo);
+    } catch {
+      throw new BadGatewayException('Could not verify the repository with GitHub; try again');
+    }
+    if (!ok) throw new BadRequestException(`The AegisOps GitHub App is not installed on ${repo}. Install it on that repository first.`);
+  }
 
   @Post()
   @Roles('platform_admin', 'devops_engineer')
   @Audited({ action: 'project.create', targetType: 'project' })
   async create(@Body() dto: CreateProjectDto, @CurrentUser() user: AuthUser) {
+    await this.assertRepoLinkable(dto.githubRepo);
     try {
       return await this.prisma.project.create({
         data: {
@@ -74,7 +88,8 @@ export class ProjectsController {
   @Roles('platform_admin', 'devops_engineer')
   @ProjectAccess('manage')
   @Audited({ action: 'project.update', targetType: 'project', targetParam: 'projectId' })
-  update(@Param('projectId') projectId: string, @Body() dto: UpdateProjectDto) {
+  async update(@Param('projectId') projectId: string, @Body() dto: UpdateProjectDto) {
+    await this.assertRepoLinkable(dto.githubRepo);
     return this.prisma.project.update({ where: { id: projectId }, data: dto });
   }
 
@@ -203,7 +218,7 @@ export class ProjectsController {
 
 @Module({
   controllers: [ProjectsController],
-  providers: [ProjectAccessService, ProjectAccessGuard],
+  providers: [ProjectAccessService, ProjectAccessGuard, { provide: GITHUB_APP, useFactory: () => GitHubApp.fromEnv() }],
   exports: [ProjectAccessService, ProjectAccessGuard],
 })
 export class ProjectsModule {}

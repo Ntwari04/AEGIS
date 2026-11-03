@@ -1,7 +1,8 @@
 import {
-  BadRequestException, Body, Controller, ForbiddenException, Get, Headers, Inject, Injectable, Module,
-  NotFoundException, OnModuleDestroy, Param, Post, Req,
+  BadRequestException, Body, Controller, ForbiddenException, Get, Headers, HttpCode, Inject, Injectable, Module,
+  NotFoundException, OnModuleDestroy, Param, Post, Req, UnauthorizedException,
 } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { Queue } from 'bullmq';
 import { IsOptional, IsString, Length, Matches } from 'class-validator';
 import { CurrentUser, ProjectAccess, Roles } from '../auth/decorators';
@@ -55,7 +56,7 @@ export class DeploymentsService {
 
   /** Creates the PENDING record and enqueues it. Idempotent on `idempotencyKey` so a retried webhook cannot double-deploy. */
   async create(args: {
-    environmentId: string; commitSha: string; imageRef: string; source: 'webhook' | 'manual' | 'rollback';
+    environmentId: string; commitSha: string; imageRef: string; source: 'webhook' | 'manual' | 'rollback' | 'api-key';
     triggeredById?: string | null; idempotencyKey?: string; restoredFromId?: string;
   }) {
     if (args.idempotencyKey) {
@@ -218,9 +219,66 @@ export class WebhooksController {
   }
 }
 
+class CiDeployDto {
+  @IsString() @Length(1, 40) @Matches(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, { message: 'environment must be an environment name' }) environment!: string;
+  @IsString() @Matches(/^[0-9a-f]{40}$/, { message: 'commitSha must be a full 40-char sha' }) commitSha!: string;
+}
+
+/**
+ * FR-IAM-5: lets a project's CI trigger a deployment with an API key instead of a user session.
+ * Deliberately narrow: this is the ONLY route an API key can call, it is bound to the key's own project, it needs the
+ * deployments:trigger scope, it can never deploy to production (a key carries no role, and FR-DEPLOY-6 requires a
+ * privileged human for production), and the image is always <env repository>:<sha>. Revoking the key stops it at once.
+ */
+@Controller('ci')
+export class CiController {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly svc: DeploymentsService,
+    private readonly audit: AuditService,
+  ) {}
+
+  @Post('deployments')
+  @Public()
+  @HttpCode(201)
+  async deploy(
+    @Req() req: { ip?: string }, @Headers('x-api-key') key: string | undefined,
+    @Headers('idempotency-key') idem: string | undefined, @Body() dto: CiDeployDto,
+  ) {
+    const deny = async (reason: string, status: 401 | 403, extra: object = {}): Promise<never> => {
+      await this.audit.record({ actorName: 'api-key', action: 'apikey.rejected', result: 'DENIED', sourceIp: req.ip, metadata: { reason, ...extra } });
+      throw status === 401 ? new UnauthorizedException('Invalid API key') : new ForbiddenException('This API key cannot do that');
+    };
+    if (!key || !key.startsWith('aegis_') || key.length > 100) return deny('malformed', 401);
+    const row = await this.prisma.apiKey.findUnique({ where: { keyHash: createHash('sha256').update(key).digest('hex') }, include: { project: true } });
+    if (!row) return deny('unknown', 401);
+    if (row.revokedAt) return deny('revoked', 401, { keyPrefix: row.prefix });
+    if (!row.scopes.includes('deployments:trigger')) return deny('missing_scope', 403, { keyPrefix: row.prefix });
+
+    const env = await this.prisma.environment.findFirst({ where: { projectId: row.projectId, name: dto.environment } });
+    if (!env) throw new NotFoundException('Environment not found');
+    if (env.isProduction) return deny('production_not_allowed', 403, { keyPrefix: row.prefix, environment: env.name });
+    const repo = imageRepoFor({ ...env, project: row.project });
+    if (!repo) throw new BadRequestException('Environment has no imageRepo or project githubRepo');
+
+    const { deployment, created } = await this.svc.create({
+      environmentId: env.id, commitSha: dto.commitSha, imageRef: `${repo}:${dto.commitSha}`, source: 'api-key',
+      triggeredById: row.userId, idempotencyKey: idem ? `key:${row.id}:${env.id}:${idem.slice(0, 100)}` : undefined,
+    });
+    if (created) {
+      await this.prisma.apiKey.update({ where: { id: row.id }, data: { lastUsedAt: new Date() } });
+      await this.audit.record({
+        actorId: row.userId, actorName: `apikey:${row.prefix}`, action: 'deployment.trigger', targetType: 'deployment', targetId: deployment.id,
+        result: 'SUCCESS', sourceIp: req.ip, metadata: { project: row.project.slug, environment: env.name, commit: dto.commitSha },
+      });
+    }
+    return { id: deployment.id, status: deployment.status, commitSha: deployment.commitSha, environment: env.name };
+  }
+}
+
 @Module({
   imports: [ProjectsModule],
-  controllers: [DeploymentsController, WebhooksController],
+  controllers: [DeploymentsController, WebhooksController, CiController],
   providers: [DeploymentsService, { provide: DEPLOYMENT_QUEUE, useClass: BullDeploymentQueue }],
   exports: [DeploymentsService],
 })

@@ -3,6 +3,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import type { DockerOps, Router } from './docker-ops';
 import { renderRoute, routeFileName } from './nginx-config';
+import type { SecretSource } from '../secrets/secrets.service';
+import type { DeployReporter, DeploymentContext } from '../github/github-app';
 
 export interface EngineOptions {
   network: string;
@@ -12,6 +14,8 @@ export interface EngineOptions {
   tls: boolean;
   /** Container name of Nginx on the network, used to verify a route end to end after switching it. */
   nginxContainer: string;
+  /** Public origin of the dashboard, used for the log link reported to GitHub. */
+  webOrigin?: string;
 }
 
 export const DEFAULT_ENGINE_OPTIONS: EngineOptions = {
@@ -41,6 +45,8 @@ export class DeployEngine {
     private readonly docker: DockerOps,
     private readonly router: Router,
     private readonly opts: EngineOptions = DEFAULT_ENGINE_OPTIONS,
+    private readonly secrets?: SecretSource,
+    private readonly reporter?: DeployReporter,
   ) {}
 
   async run(deploymentId: string): Promise<void> {
@@ -65,6 +71,17 @@ export class DeployEngine {
     });
     const name = `aegis-${slug}-${env.name}-${dep.id.slice(0, 8)}`;
     let started = false;
+    const repo = env.project.githubRepo;
+    const ghCtx: DeploymentContext | null = repo && dep.commitSha
+      ? {
+          repo, sha: dep.commitSha, environment: env.name, isProduction: env.isProduction,
+          environmentUrl: env.domain ? `https://${env.domain}` : undefined,
+          logUrl: this.opts.webOrigin ? `${this.opts.webOrigin}/projects/${env.projectId}/deployments/${dep.id}?env=${env.id}` : undefined,
+        }
+      : null;
+    let ghHandle: unknown;
+    const report = (state: 'success' | 'failure' | 'error', description: string) =>
+      ghCtx && this.reporter ? this.reporter.finished(ghHandle, ghCtx, state, description).catch(() => undefined) : Promise.resolve();
 
     const fail = async (reason: string) => {
       if (started) {
@@ -78,11 +95,15 @@ export class DeployEngine {
         where: { id: dep.id },
         data: { status: rolledBack ? 'ROLLED_BACK' : 'FAILED', failureReason: reason.slice(0, 500), finishedAt: new Date() },
       });
+      await report('failure', rolledBack ? `Rolled back: ${reason}` : `Failed: ${reason}`);
       await this.audit.record({
         actorId: dep.triggeredById, action: 'deployment.finish', targetType: 'deployment', targetId: dep.id,
         result: 'ERROR', metadata: { status: rolledBack ? 'ROLLED_BACK' : 'FAILED', reason: reason.slice(0, 200) },
       });
     };
+
+    // Reporting is a courtesy: whatever the reporter does, it must never affect the deployment.
+    if (ghCtx && this.reporter) ghHandle = await this.reporter.started(ghCtx).catch(() => undefined);
 
     try {
       if (!dep.imageRef) return await fail('deployment has no image reference');
@@ -90,12 +111,18 @@ export class DeployEngine {
       await say(`pulling ${dep.imageRef}`);
       await this.docker.pull(dep.imageRef);
 
+      // Secret values are decrypted only here, in the deployer, and go straight into the container's environment.
+      // They are never logged: the deployment log records how many were injected, not their names or values.
+      const secretVars = this.secrets ? await this.secrets.forEnvironment(env.id) : [];
+      if (secretVars.length) await say(`injecting ${secretVars.length} secret environment variable(s)`);
+
       await say(`starting ${name}`);
       await this.docker.run({
         name,
         image: dep.imageRef,
         network: this.opts.network,
-        env: [`PORT=${env.containerPort}`, `AEGIS_PROJECT=${slug}`, `AEGIS_ENVIRONMENT=${env.name}`, `AEGIS_COMMIT=${dep.commitSha ?? ''}`],
+        // Secrets first, platform variables last: a secret can never override PORT / AEGIS_* (also blocked by name).
+        env: [...secretVars, `PORT=${env.containerPort}`, `AEGIS_PROJECT=${slug}`, `AEGIS_ENVIRONMENT=${env.name}`, `AEGIS_COMMIT=${dep.commitSha ?? ''}`],
         labels: {
           'aegisops.managed': 'true',
           'aegisops.project': slug,
@@ -154,6 +181,7 @@ export class DeployEngine {
         where: { id: dep.id },
         data: { status: 'SUCCESS', containerName: name, finishedAt: new Date() },
       });
+      await report('success', 'Deployed and healthy');
       await this.audit.record({
         actorId: dep.triggeredById, action: 'deployment.finish', targetType: 'deployment', targetId: dep.id,
         result: 'SUCCESS', metadata: { project: slug, environment: env.name, commit: dep.commitSha },

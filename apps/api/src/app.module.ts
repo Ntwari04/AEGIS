@@ -12,6 +12,7 @@ import { RolesGuard } from './auth/roles.guard';
 import { ProjectsModule } from './projects/projects.controller';
 import { ProjectAccessGuard } from './projects/project-access';
 import { DeploymentsModule } from './deployments/deployments.controller';
+import { SecretsModule } from './secrets/secrets.controller';
 import { HealthModule } from './health/health.controller';
 import { AllExceptionsFilter } from './common/http-exception.filter';
 
@@ -32,6 +33,7 @@ class CoreModule {}
     UsersModule,
     ProjectsModule,
     DeploymentsModule,
+    SecretsModule,
     HealthModule,
   ],
   providers: [

@@ -94,7 +94,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  for (const env of ['staging', 'rollbacks', 'firstbad', 'noroute', 'inject']) {
+  for (const env of ['staging', 'rollbacks', 'firstbad', 'noroute', 'inject', 'secretenv']) {
     for (const c of await ops.listManaged('sample', env).catch(() => [])) await ops.remove(c).catch(() => undefined);
   }
   await nginx?.stop().catch(() => undefined);
@@ -211,5 +211,64 @@ describe('deployment engine on real Docker + Nginx', () => {
     const last = await prisma.deployment.findFirstOrThrow({ where: { status: 'SUCCESS' }, orderBy: { startedAt: 'desc' } });
     await engine.run(last.id);
     expect((await prisma.deployment.findUniqueOrThrow({ where: { id: last.id } })).status).toBe('SUCCESS');
+  });
+});
+
+describe('secrets and GitHub reporting in the engine', () => {
+  const VALUE = `s3cr3t-${randomBytes(6).toString('hex')}`;
+
+  it('injects decrypted secrets into the container environment, never logs them, and reports to GitHub', async () => {
+    const { SecretsCrypto } = await import('../src/secrets/secrets-crypto');
+    const { SecretsService } = await import('../src/secrets/secrets.service');
+    const secrets = SecretsService.withCrypto(prisma as any, new SecretsCrypto(randomBytes(32).toString('base64')));
+    const reports: { kind: string; state?: string; ctx: any }[] = [];
+    const reporter = {
+      started: async (ctx: any) => { reports.push({ kind: 'started', ctx }); return 7; },
+      finished: async (handle: unknown, ctx: any, state: string) => { reports.push({ kind: `finished:${handle}`, state, ctx }); },
+    };
+    await prisma.project.update({ where: { id: projectId }, data: { githubRepo: 'example-org/sample' } });
+    const env = await newEnv('secretenv', null);
+    await secrets.set(env.id, 'DEMO_TOKEN', VALUE);
+    await secrets.set(env.id, 'PORT', '1').catch((e) => expect(String(e.message)).toMatch(/set by the platform/));
+
+    const e2 = new DeployEngine(prisma as any, new AuditService(prisma as any), ops, new NginxRouter(docker, confDir, `aegis-it-nginx-${suffix}`), {
+      network, healthTimeoutMs: 20_000, healthIntervalMs: 1_000, tls: false, nginxContainer: `aegis-it-nginx-${suffix}`, webOrigin: 'https://dash.example.com',
+    }, secrets, reporter);
+    const dep = await prisma.deployment.create({ data: { environmentId: env.id, imageRef: 'aegisops-sample:good', commitSha: SHA_A } });
+    await e2.run(dep.id);
+
+    const after = await prisma.deployment.findUniqueOrThrow({ where: { id: dep.id } });
+    expect(after.status).toBe('SUCCESS');
+    const inspect = await docker.getContainer(after.containerName!).inspect();
+    expect(inspect.Config.Env).toContain(`DEMO_TOKEN=${VALUE}`);
+    expect(inspect.Config.Env).toContain('PORT=3000'); // platform variables win
+    expect(after.logs).toMatch(/injecting 1 secret environment variable/);
+    expect(after.logs).not.toContain(VALUE);
+    expect(after.logs).not.toContain('DEMO_TOKEN');
+    const stored = await prisma.environmentSecret.findFirstOrThrow({ where: { environmentId: env.id } });
+    expect(stored.valueEnc).not.toContain(VALUE);
+
+    expect(reports.map((r) => r.kind)).toEqual(['started', 'finished:7']);
+    expect(reports[1].state).toBe('success');
+    expect(reports[0].ctx).toMatchObject({ repo: 'example-org/sample', sha: SHA_A, environment: 'secretenv', isProduction: false });
+    expect(reports[0].ctx.logUrl).toBe(`https://dash.example.com/projects/${projectId}/deployments/${dep.id}?env=${env.id}`);
+  });
+
+  it('a failed deploy is reported as failure, and a broken reporter cannot break a deployment', async () => {
+    const reports: string[] = [];
+    // started() throws (GitHub down): the deployment must carry on and still report its outcome.
+    const flaky = {
+      started: async () => { throw new Error('github down'); },
+      finished: async (_h: unknown, _c: any, state: string) => { reports.push(state); },
+    };
+    const env = await prisma.environment.findFirstOrThrow({ where: { name: 'secretenv' } });
+    const e2 = new DeployEngine(prisma as any, new AuditService(prisma as any), ops, new NginxRouter(docker, confDir, `aegis-it-nginx-${suffix}`), {
+      network, healthTimeoutMs: 20_000, healthIntervalMs: 1_000, tls: false, nginxContainer: `aegis-it-nginx-${suffix}`,
+    }, undefined, flaky);
+    const dep = await prisma.deployment.create({ data: { environmentId: env.id, imageRef: 'aegisops-sample:bad', commitSha: SHA_B } });
+    await e2.run(dep.id);
+    const after = await prisma.deployment.findUniqueOrThrow({ where: { id: dep.id } });
+    expect(after.status).toBe('ROLLED_BACK');
+    expect(reports).toEqual(['failure']);
   });
 });

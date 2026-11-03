@@ -25,6 +25,8 @@ export interface EnvironmentDto {
   containerPort?: number;
   healthPath?: string;
   imageRepo?: string | null;
+  memoryLimitMb?: number | null;
+  cpuLimit?: number | null;
 }
 
 export type DeploymentStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'ROLLED_BACK';

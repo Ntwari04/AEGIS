@@ -14,7 +14,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { SignJWT } from 'jose';
 import request from 'supertest';
 import { PrismaClient } from '@prisma/client';
-import { createHmac } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 
 jest.setTimeout(240_000);
 
@@ -95,12 +95,16 @@ beforeAll(async () => {
     KEYCLOAK_JWKS_URI: `${kcUrl}/realms/aegisops/protocol/openid-connect/certs`,
     KEYCLOAK_AUDIENCE: 'aegisops-api',
     GITHUB_WEBHOOK_SECRET: WH_SECRET,
+    SECRETS_ENCRYPTION_KEY: randomBytes(32).toString('base64'),
   });
 
   const { AppModule } = await import('../src/app.module');
   const { configureApp } = await import('../src/configure-app');
   const { DEPLOYMENT_QUEUE } = await import('../src/deployments/deployments.controller');
+  const { GITHUB_APP } = await import('../src/github/github-app');
   const mod = await Test.createTestingModule({ imports: [AppModule] })
+    // The GitHub App is installed on every repository except acme/not-installed.
+    .overrideProvider(GITHUB_APP).useValue({ repoAccessible: async (repo: string) => repo !== 'acme/not-installed' })
     .overrideProvider(DEPLOYMENT_QUEUE).useValue({ enqueue: async (id: string) => void enqueued.push(id) })
     .compile();
   app = mod.createNestApplication<NestExpressApplication>({ rawBody: true });
@@ -446,5 +450,169 @@ describe('deployments: authorization, idempotency, webhook (PRD 6.4, FR-DEPLOY-1
     it('rejects a malformed head_sha (it is used to build an image reference)', async () => {
       await send(payload({ head_sha: 'latest; rm -rf /' })).expect(400);
     });
+  });
+});
+
+describe('environment secrets and repository linking (FR-PROJ-2/3, FR-SEC-5)', () => {
+  const VALUE = `topsecret-${randomBytes(6).toString('hex')}`;
+  let projectId: string;
+  let stagingId: string;
+  let prodId: string;
+  const url = (envId: string, name = '') => `/api/v1/projects/${projectId}/environments/${envId}/secrets${name ? `/${name}` : ''}`;
+
+  beforeAll(async () => {
+    const p = await http().post('/api/v1/projects').set(as('it-devops')).send({ name: 'Secrets', slug: 'secrets-proj' }).expect(201);
+    projectId = p.body.id;
+    const base = `/api/v1/projects/${projectId}/environments`;
+    stagingId = (await http().post(base).set(as('it-devops')).send({ name: 'staging' }).expect(201)).body.id;
+    prodId = (await http().post(base).set(as('it-devops')).send({ name: 'production', isProduction: true }).expect(201)).body.id;
+    await http().post(`/api/v1/projects/${projectId}/members`).set(as('it-devops')).send({ username: 'it-dev-a' }).expect(201);
+  });
+
+  it('a developer member can set a non-production secret; the value is never returned, stored or audited in plaintext', async () => {
+    const set = await http().put(url(stagingId, 'API_TOKEN')).set(as('it-dev-a')).send({ value: VALUE }).expect(200);
+    expect(Object.keys(set.body).sort()).toEqual(['name', 'updatedAt']);
+    expect(JSON.stringify(set.body)).not.toContain(VALUE);
+
+    const list = await http().get(url(stagingId)).set(as('it-dev-a')).expect(200);
+    expect(list.body.configured).toBe(true);
+    expect(list.body.items.map((i: any) => i.name)).toEqual(['API_TOKEN']);
+    expect(JSON.stringify(list.body)).not.toContain(VALUE);
+
+    const row = await prisma.environmentSecret.findFirstOrThrow({ where: { environmentId: stagingId } });
+    expect(row.valueEnc).not.toContain(VALUE);
+    expect(JSON.stringify(await prisma.auditLogEntry.findMany())).not.toContain(VALUE);
+    expect(await auditActions({ action: 'secret.set', actorName: 'it-dev-a' })).toContain('secret.set:SUCCESS');
+
+    // the project detail endpoint must not leak it either
+    expect(JSON.stringify((await http().get(`/api/v1/projects/${projectId}`).set(as('it-dev-a')).expect(200)).body)).not.toContain(VALUE);
+  });
+
+  it('production secrets need devops_engineer or platform_admin (same rule as FR-DEPLOY-6)', async () => {
+    await http().put(url(prodId, 'API_TOKEN')).set(as('it-dev-a')).send({ value: 'x' }).expect(403);
+    await http().put(url(prodId, 'API_TOKEN')).set(as('it-devops')).send({ value: 'prod-value' }).expect(200);
+    await http().delete(url(prodId, 'API_TOKEN')).set(as('it-dev-a')).expect(403);
+  });
+
+  it('the auditor can list names but cannot write; a non-member gets 404', async () => {
+    await http().get(url(stagingId)).set(as('it-auditor')).expect(200);
+    await http().put(url(stagingId, 'OTHER')).set(as('it-auditor')).send({ value: 'x' }).expect(403);
+    await http().delete(url(stagingId, 'API_TOKEN')).set(as('it-auditor')).expect(403);
+    await http().get(url(stagingId)).set(as('it-dev-b')).expect(404);
+    await http().put(url(stagingId, 'OTHER')).set(as('it-dev-b')).send({ value: 'x' }).expect(404);
+  });
+
+  it('validates names and values, and refuses to shadow platform variables', async () => {
+    await http().put(url(stagingId, 'lower_case')).set(as('it-devops')).send({ value: 'x' }).expect(400);
+    await http().put(url(stagingId, 'PORT')).set(as('it-devops')).send({ value: '1' }).expect(400);
+    await http().put(url(stagingId, 'AEGIS_COMMIT')).set(as('it-devops')).send({ value: '1' }).expect(400);
+    await http().put(url(stagingId, 'EMPTY')).set(as('it-devops')).send({ value: '' }).expect(400);
+    await http().put(url(stagingId, 'BIG')).set(as('it-devops')).send({ value: 'x'.repeat(8193) }).expect(400);
+    await http().put(url(stagingId, 'X')).set(as('it-devops')).send({}).expect(400);
+  });
+
+  it('overwrites on repeat, deletes, and cascades with the environment', async () => {
+    await http().put(url(stagingId, 'ROTATE_ME')).set(as('it-devops')).send({ value: 'one' }).expect(200);
+    await http().put(url(stagingId, 'ROTATE_ME')).set(as('it-devops')).send({ value: 'two' }).expect(200);
+    expect((await http().get(url(stagingId)).set(as('it-devops'))).body.items.filter((i: any) => i.name === 'ROTATE_ME')).toHaveLength(1);
+    await http().delete(url(stagingId, 'ROTATE_ME')).set(as('it-devops')).expect(204);
+    expect((await http().get(url(stagingId)).set(as('it-devops'))).body.items.map((i: any) => i.name)).toEqual(['API_TOKEN']);
+    await prisma.environment.delete({ where: { id: stagingId } });
+    expect(await prisma.environmentSecret.count({ where: { environmentId: stagingId } })).toBe(0);
+  });
+
+  it('a project can only be linked to a repository the GitHub App is installed on (FR-PROJ-2)', async () => {
+    const bad = await http().post('/api/v1/projects').set(as('it-devops')).send({ name: 'NoApp', slug: 'no-app', githubRepo: 'acme/not-installed' }).expect(400);
+    expect(bad.body.error.message).toMatch(/GitHub App is not installed/);
+    await http().post('/api/v1/projects').set(as('it-devops')).send({ name: 'WithApp', slug: 'with-app', githubRepo: 'acme/installed' }).expect(201);
+    const created = await http().post('/api/v1/projects').set(as('it-devops')).send({ name: 'Upd', slug: 'upd-app' }).expect(201);
+    await http().patch(`/api/v1/projects/${created.body.id}`).set(as('it-devops')).send({ githubRepo: 'acme/not-installed' }).expect(400);
+  });
+
+  it('resource limits are validated and stored per environment (FR-PROJ-3)', async () => {
+    const base = `/api/v1/projects/${projectId}/environments`;
+    await http().post(base).set(as('it-devops')).send({ name: 'tiny', memoryLimitMb: 8 }).expect(400);
+    await http().post(base).set(as('it-devops')).send({ name: 'greedy', cpuLimit: 1000 }).expect(400);
+    const ok = await http().post(base).set(as('it-devops')).send({ name: 'limited', memoryLimitMb: 256, cpuLimit: 0.5 }).expect(201);
+    expect(ok.body).toMatchObject({ memoryLimitMb: 256, cpuLimit: 0.5 });
+  });
+});
+
+describe('API-key deployments for CI (FR-IAM-5)', () => {
+  const SHA = 'e'.repeat(40);
+  let projectId: string;
+  let otherProjectId: string;
+  let key = '';
+  let keyId = '';
+  const post = (apiKey: string | undefined, body: object = { environment: 'staging', commitSha: SHA }, headers: Record<string, string> = {}) => {
+    const r = http().post('/api/v1/ci/deployments').set(headers);
+    return (apiKey ? r.set('X-API-Key', apiKey) : r).send(body);
+  };
+
+  beforeAll(async () => {
+    projectId = (await http().post('/api/v1/projects').set(as('it-devops')).send({ name: 'CI', slug: 'ci-proj', githubRepo: 'acme/ci-proj' }).expect(201)).body.id;
+    otherProjectId = (await http().post('/api/v1/projects').set(as('it-devops')).send({ name: 'Other', slug: 'ci-other', githubRepo: 'acme/ci-other' }).expect(201)).body.id;
+    for (const id of [projectId, otherProjectId]) {
+      await http().post(`/api/v1/projects/${id}/environments`).set(as('it-devops')).send({ name: 'staging' }).expect(201);
+    }
+    await http().post(`/api/v1/projects/${otherProjectId}/environments`).set(as('it-devops')).send({ name: 'only-other' }).expect(201);
+    await http().post(`/api/v1/projects/${projectId}/environments`).set(as('it-devops')).send({ name: 'production', isProduction: true }).expect(201);
+    const k = await http().post(`/api/v1/projects/${projectId}/api-keys`).set(as('it-devops')).send({ name: 'ci', scopes: ['deployments:trigger'] }).expect(201);
+    key = k.body.key;
+    keyId = k.body.id;
+  });
+
+  it('a valid key triggers a non-production deployment of its own project, attributed to the key in the audit log', async () => {
+    const res = await post(key).expect(201);
+    expect(res.body).toMatchObject({ status: 'PENDING', commitSha: SHA, environment: 'staging' });
+    expect(enqueued).toContain(res.body.id);
+    const dep = await prisma.deployment.findUniqueOrThrow({ where: { id: res.body.id } });
+    expect(dep).toMatchObject({ triggerSource: 'api-key', imageRef: `ghcr.io/acme/ci-proj:${SHA}` });
+    expect((await prisma.apiKey.findUniqueOrThrow({ where: { id: keyId } })).lastUsedAt).not.toBeNull();
+    const audit = await prisma.auditLogEntry.findFirstOrThrow({ where: { action: 'deployment.trigger', targetId: res.body.id } });
+    expect(audit.actorName).toMatch(/^apikey:aegis_/);
+    expect(JSON.stringify(await prisma.auditLogEntry.findMany())).not.toContain(key);
+  });
+
+  it('rejects missing, malformed, unknown and revoked keys (401) and audits each without logging the key', async () => {
+    await post(undefined).expect(401);
+    await post('not-a-key').expect(401);
+    await post(`aegis_${'x'.repeat(43)}`).expect(401);
+    const doomed = (await http().post(`/api/v1/projects/${projectId}/api-keys`).set(as('it-devops')).send({ name: 'doomed', scopes: ['deployments:trigger'] }).expect(201)).body;
+    await post(doomed.key).expect(201);
+    await http().delete(`/api/v1/projects/${projectId}/api-keys/${doomed.id}`).set(as('it-devops')).expect(204);
+    await post(doomed.key).expect(401);
+    const reasons = (await prisma.auditLogEntry.findMany({ where: { action: 'apikey.rejected' } })).map((a) => (a.metadata as any)?.reason);
+    expect(reasons).toEqual(expect.arrayContaining(['malformed', 'unknown', 'revoked']));
+    expect(JSON.stringify(await prisma.auditLogEntry.findMany())).not.toContain(doomed.key);
+  });
+
+  it('needs the deployments:trigger scope', async () => {
+    const readOnly = (await http().post(`/api/v1/projects/${projectId}/api-keys`).set(as('it-devops')).send({ name: 'ro', scopes: ['deployments:read'] }).expect(201)).body;
+    await post(readOnly.key).expect(403);
+  });
+
+  it('can never deploy to production, and cannot reach another project environment', async () => {
+    await post(key, { environment: 'production', commitSha: SHA }).expect(403);
+    await post(key, { environment: 'only-other', commitSha: SHA }).expect(404); // exists, but in another project
+    await post(key, { environment: 'nope', commitSha: SHA }).expect(404);
+  });
+
+  it('validates the body', async () => {
+    await post(key, { environment: 'staging', commitSha: 'main' }).expect(400);
+    await post(key, { environment: 'Staging; rm -rf', commitSha: SHA }).expect(400);
+    await post(key, { environment: 'staging' }).expect(400);
+  });
+
+  it('is idempotent with an Idempotency-Key', async () => {
+    const a = await post(key, undefined, { 'Idempotency-Key': 'ci-run-42' }).expect(201);
+    const b = await post(key, undefined, { 'Idempotency-Key': 'ci-run-42' }).expect(201);
+    expect(b.body.id).toBe(a.body.id);
+  });
+
+  it('an API key is useless anywhere else: it is not a bearer token and not accepted by user routes', async () => {
+    await http().get('/api/v1/projects').set('Authorization', `Bearer ${key}`).expect(401);
+    await http().get('/api/v1/projects').set('X-API-Key', key).expect(401);
+    await http().put(`/api/v1/projects/${projectId}/environments/x/secrets/A`).set('X-API-Key', key).send({ value: 'v' }).expect(401);
   });
 });

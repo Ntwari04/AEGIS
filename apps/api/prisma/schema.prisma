@@ -95,6 +95,22 @@ model Server {
   containers   Container[]
 }
 
+/// An environment variable whose VALUE is a secret (FR-SEC-5). valueEnc is AES-256-GCM (iv.tag.ciphertext, base64),
+/// bound to this row by AAD (environmentId + name). The plaintext is never stored, returned, logged or audited.
+model EnvironmentSecret {
+  id            String   @id @default(uuid())
+  environmentId String
+  name          String
+  valueEnc      String
+  updatedById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  environment Environment @relation(fields: [environmentId], references: [id], onDelete: Cascade)
+
+  @@unique([environmentId, name])
+}
+
 model Environment {
   id           String   @id @default(uuid())
   projectId    String
@@ -118,6 +134,7 @@ model Environment {
   server      Server?      @relation(fields: [serverId], references: [id])
   deployments Deployment[]
   containers  Container[]
+  secrets     EnvironmentSecret[]
 
   @@unique([projectId, name])
 }
