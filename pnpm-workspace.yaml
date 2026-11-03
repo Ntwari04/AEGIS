@@ -10,7 +10,7 @@ allowBuilds:
   cpu-features: false
   protobufjs: false
   ssh2: false
-  msgpackr-extract: set this to true or false
+  msgpackr-extract: false
 # Security overrides (CI fails on high/critical advisories; see .github/workflows/ci.yml).
 overrides:
   multer: ">=2.5.0"
