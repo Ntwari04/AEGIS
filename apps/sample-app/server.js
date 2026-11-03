@@ -21,4 +21,4 @@ http.createServer((req, res) => {
   res.end(`AegisOps sample app, version ${VERSION}\n`);
 }).listen(PORT, '0.0.0.0', () => console.log(`listening on ${PORT} (version ${VERSION})`));
 
-// build marker: v2 (deployer socket fixed)
+// build marker: v3 (broken-health rehearsal)
