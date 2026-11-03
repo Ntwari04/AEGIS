@@ -79,12 +79,20 @@ export class GitHubApp {
     return body.token;
   }
 
-  /** True when the App installation can see this repository (so the project can be linked to it). */
+  /**
+   * True only when this App INSTALLATION covers the repository (FR-PROJ-2). A plain GET /repos/{repo} is not enough:
+   * it succeeds for any public repository, installed or not. So list what the installation can access and match by name.
+   */
   async repoAccessible(fullName: string): Promise<boolean> {
-    const res = await this.call(`/repos/${fullName}`, { auth: 'installation' });
-    if (res.status === 200) return true;
-    if (res.status === 404 || res.status === 403) return false;
-    throw new Error(`GitHub repository check failed (${res.status})`);
+    const wanted = fullName.toLowerCase();
+    for (let page = 1; page <= 20; page++) {
+      const res = await this.call(`/installation/repositories?per_page=100&page=${page}`, { auth: 'installation' });
+      if (!res.ok) throw new Error(`GitHub repository check failed (${res.status})`);
+      const body = (await res.json()) as { repositories: { full_name: string }[] };
+      if (body.repositories.some((r) => r.full_name.toLowerCase() === wanted)) return true;
+      if (body.repositories.length < 100) return false;
+    }
+    return false;
   }
 
   /** Creates a GitHub Deployment for the commit and returns its id; later updated with {@link setDeploymentState}. */

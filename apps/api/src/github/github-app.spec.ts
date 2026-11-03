@@ -48,17 +48,27 @@ describe('GitHubApp', () => {
     expect(calls).toHaveLength(2);
   });
 
-  it('repoAccessible: 200 true, 404/403 false, anything else throws', async () => {
-    for (const [status, expected] of [[200, true], [404, false], [403, false]] as const) {
-      const { app } = makeApp((url) => (isTokenCall(url) ? tokenOk : { status }));
-      expect(await app.repoAccessible('o/r')).toBe(expected);
-    }
-    const { app } = makeApp((url) => (isTokenCall(url) ? tokenOk : { status: 500 }));
-    await expect(app.repoAccessible('o/r')).rejects.toThrow('500');
+  it('repoAccessible matches only repositories the installation covers (case-insensitive), not any public repo', async () => {
+    const list = (names: string[]) => ({ status: 200, body: { repositories: names.map((full_name) => ({ full_name })) } });
+    const { app, calls } = makeApp((url) => (isTokenCall(url) ? tokenOk : list(['Acme/App', 'acme/other'])));
+    expect(await app.repoAccessible('acme/app')).toBe(true);
+    expect(await app.repoAccessible('octocat/Hello-World')).toBe(false); // exists and is public, but not installed
+    expect(calls.some((c) => c.url.includes('/installation/repositories'))).toBe(true);
+    expect(calls.some((c) => c.url.includes('/repos/'))).toBe(false);
+  });
+
+  it('repoAccessible pages through large installations and surfaces API failures', async () => {
+    const full = Array.from({ length: 100 }, (_, i) => ({ full_name: 'o/r' + i }));
+    const { app } = makeApp((url) =>
+      isTokenCall(url) ? tokenOk : url.endsWith('&page=1') ? { status: 200, body: { repositories: full } } : { status: 200, body: { repositories: [{ full_name: 'o/last' }] } },
+    );
+    expect(await app.repoAccessible('o/last')).toBe(true);
+    const { app: broken } = makeApp((url) => (isTokenCall(url) ? tokenOk : { status: 500 }));
+    await expect(broken.repoAccessible('o/r')).rejects.toThrow('500');
   });
 
   it('uses the installation token (not the app JWT) for repository calls', async () => {
-    const { app, calls } = makeApp((url) => (isTokenCall(url) ? tokenOk : { status: 200 }));
+    const { app, calls } = makeApp((url) => (isTokenCall(url) ? tokenOk : { status: 200, body: { repositories: [] } }));
     await app.repoAccessible('o/r');
     expect(calls[1].init.headers.Authorization).toBe('Bearer ghs_installtoken');
   });
