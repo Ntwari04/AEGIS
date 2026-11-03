@@ -274,4 +274,23 @@ Core entities: `User` (mirrors Keycloak subject, not the password), `Role`, `Pro
 
 ---
 
+## 16. Implementation notes & deviations (updated during Phase 2 build)
+
+Recorded so the spec and the code do not drift. Items marked **Open** are not yet met.
+
+- **Roles (FR-IAM-3 / §9):** there is no `Role` table. Roles live only in Keycloak and arrive as the `roles` claim of the validated JWT. A marker realm role `mfa_required` is included in the `platform_admin` and `devops_engineer` composites; the browser flow requires TOTP for holders of it (FR-IAM-2). `developer` MFA is not forced.
+- **OpenAPI (§10):** the Swagger UI at `/api/docs` is **Open**; it is deferred until it can be placed behind authentication.
+- **FR-IAM-5 API keys:** create / list / revoke are implemented (SHA-256 at rest, project-scoped, scopes `deployments:trigger`, `deployments:read`). *Authenticating with* an API key is **Open** and lands with the Deployment Engine (Phase 3).
+- **FR-IAM-6 auth events:** the API audits rejected tokens, role denials and project-access denials. Login success/failure/MFA events are emitted by Keycloak (event listeners enabled in the realm) to its logs; surfacing them in the audit view and the failed-login alert is **Open** (Phase 4, with Loki).
+- **FR-IAM-7:** access token 15 min, SSO session max 8 h, refresh tokens rotate and are single-use (configured in the realm). A role change takes effect at the next token refresh (≤ 15 min). Immediate server-side revocation / forced re-auth on role change is **Open**.
+- **Access to non-members** returns `404` (not `403`) so project existence is not disclosed; the attempt is audited (`authz.project_denied`).
+- **Keycloak exposure:** served at `auth.$DOMAIN`; Nginx returns 404 for `/admin`, `/realms/master`, `/metrics`, `/health`. Keycloak is administered via `kcadm` inside the container.
+- **Rate limiting:** global in-process limit (120/min/IP) plus Nginx `limit_req`. The throttler is not yet Redis-backed, so it is per-instance (fine for one API container). The API has no password endpoints; Keycloak enforces brute-force lockout.
+- **CSP (§8.5):** the dashboard ships a CSP with `'unsafe-inline'` for scripts (Next.js inline bootstrap). A nonce-based CSP is **Open**.
+- **Images:** the API image reuses the build stage (non-root, but not slimmed); slimming with `pnpm deploy --prod` is a follow-up.
+- **Build tooling:** the API is compiled with `tsc` rather than the Nest CLI.
+- **Local ports:** the dev override uses non-default ports (Postgres 15432, Redis 16379, Keycloak 18080, web 13000).
+
+---
+
 *This PRD is a living document. As Claude Code builds against it, update this file in place rather than letting the build drift from the spec — a PRD nobody updates becomes fiction by Phase 3.*

@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url';
+
 const csp = [
   "default-src 'self'",
   // Next.js injects inline bootstrap scripts; a nonce-based CSP is a follow-up (see docs/phase2-core-platform.md).
@@ -12,6 +14,7 @@ const csp = [
 
 /** @type {import('next').NextConfig} */
 export default {
+  outputFileTracingRoot: fileURLToPath(new URL('../../', import.meta.url)),
   output: 'standalone',
   poweredByHeader: false,
   transpilePackages: ['@aegisops/shared-types'],

@@ -10,3 +10,10 @@ allowBuilds:
   cpu-features: false
   protobufjs: false
   ssh2: false
+# Security overrides (CI fails on high/critical advisories; see .github/workflows/ci.yml).
+overrides:
+  multer: ">=2.5.0"
+  deepmerge-ts: ">=8.0.0"
+  "js-yaml@>=3.0.0 <3.15.2": "^3.15.2"
+  "js-yaml@>=4.0.0 <4.3.2": "^4.3.2"
+  "postcss@<8.5.18": ">=8.5.18"

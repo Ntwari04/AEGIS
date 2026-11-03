@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @aegisops/shared-types build
+      - run: pnpm --filter @aegisops/api exec prisma generate
+      - run: pnpm lint
+      - name: Unit tests (guards, authz rules, compose security invariants)
+        run: pnpm --filter @aegisops/api test
+      - name: Integration tests (real Postgres + real Keycloak via Testcontainers)
+        run: pnpm --filter @aegisops/api test:integration
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Fails the build on any high/critical advisory; do not add ignores without a written exception in docs/.
+      - run: pnpm audit --audit-level=high
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  image-scan:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [api, web]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.app }} image
+        run: docker build -f apps/${{ matrix.app }}/Dockerfile --target runtime -t aegisops-${{ matrix.app }}:ci .
+      - name: Trivy scan (HIGH/CRITICAL fails the build)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: aegisops-${{ matrix.app }}:ci
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true

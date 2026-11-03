@@ -1,0 +1,10 @@
+**/node_modules
+**/.next
+**/dist
+**/.env
+**/.env.*
+!**/.env.example
+.git
+infra/nginx/certs
+e2e
+docs
