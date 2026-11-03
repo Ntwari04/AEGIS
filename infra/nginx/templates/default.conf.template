@@ -1,0 +1,46 @@
+# This file is a TEMPLATE. On container start, the official nginx image's
+# entrypoint runs envsubst over every *.template file in /etc/nginx/templates
+# and writes the result to /etc/nginx/conf.d/<name-without-.template>, using
+# whatever environment variables are set on the container (here: $DOMAIN,
+# passed in from infra/.env via docker-compose.yml). You should not need to
+# edit this file for Phase 1 — just set DOMAIN in .env.
+
+server {
+    listen 80;
+    server_name ${DOMAIN} www.${DOMAIN};
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ${DOMAIN} www.${DOMAIN};
+
+    ssl_certificate     /etc/nginx/certs/cert.pem;
+    ssl_certificate_key /etc/nginx/certs/key.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+
+    # Placeholder root response — replace with a proxy_pass to your first
+    # app container once one exists (Phase 2), e.g.:
+    #
+    #   location / {
+    #       proxy_pass http://my-app-container:PORT;
+    #       proxy_set_header Host $host;
+    #       proxy_set_header X-Real-IP $remote_addr;
+    #       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    #       proxy_set_header X-Forwarded-Proto $scheme;
+    #   }
+    location / {
+        default_type text/plain;
+        return 200 "AegisOps reverse proxy is live. No application is wired up yet — this is the Phase 1 placeholder.\n";
+    }
+
+    location /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+}

@@ -1,0 +1,21 @@
+networks:
+  aegisops-net:
+    external: true   # created ahead of time by scripts/03-create-network.sh
+
+services:
+  nginx:
+    image: nginx:stable-alpine
+    container_name: aegisops-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN}
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d   # writable: the entrypoint renders templates/*.template into here on start
+      - ./nginx/templates:/etc/nginx/templates:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    networks:
+      - aegisops-net

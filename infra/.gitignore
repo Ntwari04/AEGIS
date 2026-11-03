@@ -1,0 +1,7 @@
+# Never commit real secrets or certificates
+.env
+nginx/certs/*.pem
+nginx/certs/*.key
+
+# Generated at container start — keep the .template source only
+nginx/conf.d/default.conf
