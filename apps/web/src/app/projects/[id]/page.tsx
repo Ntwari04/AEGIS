@@ -1,6 +1,8 @@
 import { notFound, redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
+import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { canDeploy, canManageEnvironments, currentRoles } from '@/lib/permissions';
 import type { DeploymentDto, EnvironmentDto, ProjectDto } from '@aegisops/shared-types';
 
 type Detail = ProjectDto & {
@@ -30,8 +32,41 @@ async function createEnvironment(projectId: string, formData: FormData) {
         containerPort: port ? Number(port) : undefined,
         healthPath: optional('healthPath'),
         imageRepo: optional('imageRepo'),
+        memoryLimitMb: optional('memoryLimitMb') ? Number(optional('memoryLimitMb')) : undefined,
+        cpuLimit: optional('cpuLimit') ? Number(optional('cpuLimit')) : undefined,
       }),
     }, { redirectOn401: false });
+  } catch (e) {
+    if (e instanceof ApiError) back(projectId, e.message);
+    throw e;
+  }
+  back(projectId);
+}
+
+async function setSecret(projectId: string, envId: string, formData: FormData) {
+  'use server';
+  const name = text(formData, 'name');
+  try {
+    await api(
+      `/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(envId)}/secrets/${encodeURIComponent(name)}`,
+      { method: 'PUT', body: JSON.stringify({ value: String(formData.get('value') ?? '') }) },
+      { redirectOn401: false },
+    );
+  } catch (e) {
+    if (e instanceof ApiError) back(projectId, e.message);
+    throw e;
+  }
+  back(projectId);
+}
+
+async function deleteSecret(projectId: string, envId: string, name: string) {
+  'use server';
+  try {
+    await api(
+      `/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(envId)}/secrets/${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+      { redirectOn401: false },
+    );
   } catch (e) {
     if (e instanceof ApiError) back(projectId, e.message);
     throw e;
@@ -74,6 +109,7 @@ export default async function ProjectDetail({
 }: { params: Promise<{ id: string }>; searchParams: Promise<{ error?: string }> }) {
   const { id } = await params;
   const { error } = await searchParams;
+  const roles = await currentRoles();
   let p: Detail;
   try {
     p = await api<Detail>(`/projects/${encodeURIComponent(id)}`);
@@ -87,6 +123,16 @@ export default async function ProjectDetail({
         e.id,
         await api<DeploymentDto[]>(`/projects/${encodeURIComponent(id)}/environments/${encodeURIComponent(e.id)}/deployments`).catch(() => []),
       ] as [string, DeploymentDto[]]),
+    ),
+  );
+  const secretsByEnv = new Map<string, { configured: boolean; items: { name: string; updatedAt: string }[] }>(
+    await Promise.all(
+      p.environments.map(async (e) => [
+        e.id,
+        await api<{ configured: boolean; items: { name: string; updatedAt: string }[] }>(
+          `/projects/${encodeURIComponent(id)}/environments/${encodeURIComponent(e.id)}/secrets`,
+        ).catch(() => ({ configured: false, items: [] })),
+      ] as [string, { configured: boolean; items: { name: string; updatedAt: string }[] }]),
     ),
   );
   const anyInFlight = [...history.values()].some((d) => d.some((x) => x.status === 'PENDING' || x.status === 'RUNNING'));
@@ -115,10 +161,12 @@ export default async function ProjectDetail({
                   <strong>{e.name}</strong> {e.isProduction && <span className="role">production</span>}
                   <div className="muted mono">
                     {e.domain ?? 'no domain'} · branch {e.branch ?? 'main'} · port {e.containerPort ?? 3000} · {e.healthPath ?? '/healthz'}
+                    {(e.memoryLimitMb || e.cpuLimit) && <> · limits {e.memoryLimitMb ? `${e.memoryLimitMb} MB` : 'default RAM'} / {e.cpuLimit ? `${e.cpuLimit} CPU` : 'default CPU'}</>}
                   </div>
                 </div>
                 {lastGood && <span className="muted">live: <span className="mono">{(lastGood.commitSha ?? '').slice(0, 7) || '—'}</span></span>}
               </div>
+              {canDeploy(roles, e.isProduction) && (
               <form action={deploy.bind(null, id, e.id)} className="inline">
                 <div style={{ flex: 1 }}>
                   <label htmlFor={`sha-${e.id}`}>Deploy a commit (an image for this SHA must already be built)</label>
@@ -126,6 +174,7 @@ export default async function ProjectDetail({
                 </div>
                 <button data-testid={`deploy-${e.name}`}>Deploy</button>
               </form>
+              )}
               {deployments.length > 0 && (
                 <table data-testid={`history-${e.name}`}>
                   <thead><tr><th>Status</th><th>Commit</th><th>Source</th><th>Started</th><th /></tr></thead>
@@ -140,7 +189,8 @@ export default async function ProjectDetail({
                         <td className="muted">{d.triggerSource}</td>
                         <td className="muted">{new Date(d.startedAt).toLocaleString()}</td>
                         <td>
-                          {d.status === 'SUCCESS' && d.id !== lastGood?.id && (
+                          <Link href={`/projects/${id}/deployments/${d.id}?env=${e.id}`}>Logs</Link>
+                          {canDeploy(roles, e.isProduction) && d.status === 'SUCCESS' && d.id !== lastGood?.id && (
                             <form action={rollback.bind(null, id, e.id, d.id)}>
                               <button className="link">Roll back to this</button>
                             </form>
@@ -151,11 +201,43 @@ export default async function ProjectDetail({
                   </tbody>
                 </table>
               )}
+              {(() => {
+                const sec = secretsByEnv.get(e.id) ?? { configured: false, items: [] };
+                const mayWrite = canDeploy(roles, e.isProduction);
+                return (
+                  <div data-testid={`secrets-${e.name}`} style={{ marginTop: 12 }}>
+                    <strong>Secrets</strong> <span className="muted">(environment variables; values are write-only and encrypted at rest)</span>
+                    {!sec.configured && <p className="error">Secret storage is not configured on this server (SECRETS_ENCRYPTION_KEY).</p>}
+                    {sec.items.length === 0 ? <p className="muted">None.</p> : (
+                      <table>
+                        <tbody>
+                          {sec.items.map((s) => (
+                            <tr key={s.name}>
+                              <td className="mono">{s.name}</td>
+                              <td className="muted">set {new Date(s.updatedAt).toLocaleString()}</td>
+                              <td>{mayWrite && <form action={deleteSecret.bind(null, id, e.id, s.name)}><button className="link">Delete</button></form>}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                    {mayWrite && sec.configured && (
+                      <form action={setSecret.bind(null, id, e.id)} className="inline">
+                        <div><label htmlFor={`sn-${e.id}`}>Name</label><input id={`sn-${e.id}`} name="name" required pattern="[A-Z_][A-Z0-9_]{0,63}" placeholder="DATABASE_URL" autoComplete="off" /></div>
+                        <div><label htmlFor={`sv-${e.id}`}>Value (replaces any existing value)</label><input id={`sv-${e.id}`} name="value" type="password" required maxLength={8192} autoComplete="new-password" /></div>
+                        <button data-testid={`set-secret-${e.name}`}>Save secret</button>
+                      </form>
+                    )}
+                    {sec.items.length > 0 && <p className="muted">Changes apply to the next deployment.</p>}
+                  </div>
+                );
+              })()}
             </section>
           );
         })}
       </div>
 
+      {canManageEnvironments(roles) && (
       <form action={createEnvironment.bind(null, id)} className="card">
         <strong>Add environment</strong>
         <div className="grid2">
@@ -183,10 +265,19 @@ export default async function ProjectDetail({
             <label htmlFor="env-image">Image repository (default: ghcr.io/&lt;repo&gt;)</label>
             <input id="env-image" name="imageRepo" placeholder="ghcr.io/owner/repo" />
           </div>
+          <div>
+            <label htmlFor="env-mem">Memory limit, MB (optional)</label>
+            <input id="env-mem" name="memoryLimitMb" type="number" min={64} max={65536} placeholder="default" />
+          </div>
+          <div>
+            <label htmlFor="env-cpu">CPU limit, cores (optional)</label>
+            <input id="env-cpu" name="cpuLimit" type="number" step="0.1" min={0.1} max={64} placeholder="default" />
+          </div>
         </div>
         <label className="check"><input type="checkbox" name="isProduction" /> Production environment</label>
         <button data-testid="add-environment">Add environment</button>
       </form>
+      )}
 
       <div className="card">
         <strong>Members</strong>
