@@ -21,6 +21,24 @@ export interface EnvironmentDto {
   name: string;
   isProduction: boolean;
   domain: string | null;
+  branch?: string;
+  containerPort?: number;
+  healthPath?: string;
+  imageRepo?: string | null;
+}
+
+export type DeploymentStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'ROLLED_BACK';
+
+export interface DeploymentDto {
+  id: string;
+  status: DeploymentStatus;
+  commitSha: string | null;
+  imageRef: string | null;
+  triggerSource: string;
+  restoredFromId: string | null;
+  failureReason: string | null;
+  startedAt: string;
+  finishedAt: string | null;
 }
 
 export interface Paginated<T> {
