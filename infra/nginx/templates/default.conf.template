@@ -12,6 +12,9 @@
 # starts and keeps working even when a backend container is down or being replaced.
 resolver 127.0.0.11 valid=10s ipv6=off;
 
+# Per-project routes written by the deployer (apps/api/src/deployments/nginx-config.ts).
+include /etc/nginx/conf.d/managed/*.conf;
+
 limit_req_zone $binary_remote_addr zone=api:10m rate=20r/s;
 
 server {

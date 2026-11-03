@@ -12,6 +12,15 @@ describe('infra/docker-compose.yml security invariants (PRD 8.3, 8.6, 8.7)', () 
     expect(published).toEqual(['nginx']);
   });
 
+  it('only the deployer mounts the Docker socket (never api, web, nginx)', () => {
+    const mounting = Object.entries(compose.services)
+      .filter(([, s]) => (s.volumes ?? []).some((v: string) => String(v).includes('docker.sock')))
+      .map(([n]) => n);
+    expect(mounting).toEqual(['deployer']);
+    expect(compose.services.deployer.ports).toBeUndefined();
+    expect(compose.services.deployer.cap_drop).toContain('ALL');
+  });
+
   it('no service uses network_mode: host or privileged mode', () => {
     for (const s of Object.values(compose.services)) {
       expect(s.network_mode).toBeUndefined();

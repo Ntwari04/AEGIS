@@ -9,6 +9,7 @@ import { ProjectAccessGuard, ProjectAccessService } from '../projects/project-ac
 import { ProjectsController } from '../projects/projects.controller';
 import { AuditController } from '../audit/audit.controller';
 import { UsersController } from '../users/users.service';
+import { DeploymentsController, WebhooksController } from '../deployments/deployments.controller';
 import { HealthController } from '../health/health.controller';
 import { sanitizeMetadata } from '../audit/audit.service';
 import { loadEnv } from '../config/env';
@@ -155,7 +156,7 @@ describe('ProjectAccessGuard', () => {
 });
 
 describe('every controller route declares authorization (CI rule, PRD 8.2)', () => {
-  const controllers = [ProjectsController, AuditController, UsersController, HealthController];
+  const controllers = [ProjectsController, AuditController, UsersController, HealthController, DeploymentsController, WebhooksController];
   for (const ctrl of controllers) {
     const base: string = Reflect.getMetadata(PATH_METADATA, ctrl) ?? '';
     for (const name of Object.getOwnPropertyNames(ctrl.prototype).filter((n) => n !== 'constructor')) {
@@ -182,6 +183,11 @@ describe('every controller route declares authorization (CI rule, PRD 8.2)', () 
       // RequestMethod: GET = 0; everything else mutates
       if (method === undefined || method === 0) continue;
       expect(Reflect.getMetadata(ROLES_KEY, handler)).not.toContain('auditor');
+    }
+  });
+  it('auditors can never deploy or roll back', () => {
+    for (const n of ['trigger', 'rollback']) {
+      expect(Reflect.getMetadata(ROLES_KEY, (DeploymentsController.prototype as any)[n])).not.toContain('auditor');
     }
   });
   it('the audit log controller exposes only GET', () => {

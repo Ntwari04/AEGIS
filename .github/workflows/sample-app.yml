@@ -1,0 +1,28 @@
+name: Build image
+
+# The AegisOps deployment engine listens for this workflow's successful completion (workflow_run)
+# and then deploys ghcr.io/<repo>:<head sha>. The workflow name must match GITHUB_DEPLOY_WORKFLOW.
+on:
+  push:
+    branches: [main]
+    paths: ["apps/sample-app/**"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        run: |
+          IMAGE=ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          docker build -t "$IMAGE:${{ github.sha }}" apps/sample-app
+          docker push "$IMAGE:${{ github.sha }}"

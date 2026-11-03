@@ -9,3 +9,9 @@ coverage/
 playwright-report/
 test-results/
 .turbo/
+
+# Private keys / certs must never be committed
+*.pem
+*.key
+*private-key*
+infra/secrets/

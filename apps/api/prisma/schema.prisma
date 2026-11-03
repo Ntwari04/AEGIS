@@ -107,6 +107,11 @@ model Environment {
   memoryLimitMb Int?
   /// Keys only. Values are secrets and are handled per FR-SEC-5 (Phase 3); never stored here in plaintext.
   envVarNames  String[]
+  /// Port the app listens on inside its container, and the path the health gate probes.
+  containerPort Int      @default(3000)
+  healthPath    String   @default("/healthz")
+  /// Registry repository, e.g. ghcr.io/org/app. Defaults to ghcr.io/<githubRepo> (lowercased).
+  imageRepo     String?
   createdAt    DateTime @default(now())
 
   project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -138,6 +143,12 @@ model Deployment {
   imageRef      String?
   status        DeploymentStatus @default(PENDING)
   idempotencyKey String?         @unique
+  triggerSource String           @default("manual")
+  containerName String?
+  /// For rollbacks: the deployment whose image is being restored.
+  restoredFromId String?
+  failureReason String?
+  logs          String           @default("")
   startedAt     DateTime         @default(now())
   finishedAt    DateTime?
 

@@ -117,11 +117,48 @@ services:
       KEYCLOAK_ISSUER: https://auth.${DOMAIN}/realms/aegisops
       KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/aegisops/protocol/openid-connect/certs
       KEYCLOAK_AUDIENCE: aegisops-api
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?set in infra/.env}
+      GITHUB_DEPLOY_WORKFLOW: ${GITHUB_DEPLOY_WORKFLOW:-Build image}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     read_only: true
     tmpfs: [/tmp]
+    networks:
+      - aegisops-net
+
+  # The deployer is the ONLY service with Docker access (docker.sock is root-equivalent on the host).
+  # It exposes no port and no HTTP surface; it only consumes the deployment queue. The API container
+  # never mounts the socket, so an API compromise cannot start containers directly.
+  deployer:
+    image: aegisops-api:local
+    container_name: aegisops-deployer
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    group_add: ["${DOCKER_GID:-999}"]   # numeric gid of the host docker group: stat -c %g /var/run/docker.sock
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://aegisops:${AEGISOPS_DB_PASSWORD}@postgres:5432/aegisops
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      WEB_ORIGIN: https://${DOMAIN}
+      KEYCLOAK_ISSUER: https://auth.${DOMAIN}/realms/aegisops
+      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/aegisops/protocol/openid-connect/certs
+      KEYCLOAK_AUDIENCE: aegisops-api
+      NGINX_CONTAINER: aegisops-nginx
+      NGINX_CONF_DIR: /nginx-managed
+      DOCKER_NETWORK: aegisops-net
+      GHCR_USERNAME: ${GHCR_USERNAME:-}
+      GHCR_TOKEN: ${GHCR_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./nginx/conf.d/managed:/nginx-managed   # chown 1000:1000 on the host; Nginx includes *.conf from here
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     networks:
       - aegisops-net
 

@@ -14,6 +14,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { SignJWT } from 'jose';
 import request from 'supertest';
 import { PrismaClient } from '@prisma/client';
+import { createHmac } from 'node:crypto';
 
 jest.setTimeout(240_000);
 
@@ -33,6 +34,8 @@ let kcUrl: string;
 let app: NestExpressApplication;
 let prisma: PrismaClient;
 const tokens: Record<string, string> = {};
+const enqueued: string[] = [];
+const WH_SECRET = 'integration-webhook-secret';
 
 function realmForTests() {
   const raw = readFileSync(join(__dirname, '../../../infra/keycloak/realm-aegisops.json'), 'utf8')
@@ -91,12 +94,16 @@ beforeAll(async () => {
     KEYCLOAK_ISSUER: `${kcUrl}/realms/aegisops`,
     KEYCLOAK_JWKS_URI: `${kcUrl}/realms/aegisops/protocol/openid-connect/certs`,
     KEYCLOAK_AUDIENCE: 'aegisops-api',
+    GITHUB_WEBHOOK_SECRET: WH_SECRET,
   });
 
   const { AppModule } = await import('../src/app.module');
   const { configureApp } = await import('../src/configure-app');
-  const mod = await Test.createTestingModule({ imports: [AppModule] }).compile();
-  app = mod.createNestApplication<NestExpressApplication>();
+  const { DEPLOYMENT_QUEUE } = await import('../src/deployments/deployments.controller');
+  const mod = await Test.createTestingModule({ imports: [AppModule] })
+    .overrideProvider(DEPLOYMENT_QUEUE).useValue({ enqueue: async (id: string) => void enqueued.push(id) })
+    .compile();
+  app = mod.createNestApplication<NestExpressApplication>({ rawBody: true });
   configureApp(app, process.env.WEB_ORIGIN!);
   await app.init();
   prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
@@ -309,5 +316,135 @@ describe('audit log is append-only in the database (FR-AUDIT-2)', () => {
     await expect(prisma.auditLogEntry.deleteMany()).rejects.toThrow(/append-only/);
     await expect(prisma.$executeRawUnsafe('TRUNCATE "AuditLogEntry"')).rejects.toThrow(/append-only/);
     expect(await prisma.auditLogEntry.findUnique({ where: { id: row.id } })).toMatchObject({ action: row.action });
+  });
+});
+
+describe('deployments: authorization, idempotency, webhook (PRD 6.4, FR-DEPLOY-1/4/6)', () => {
+  const SHA = 'd'.repeat(40);
+  let projectId: string;
+  let stagingId: string;
+  let prodId: string;
+  const base = () => `/api/v1/projects/${projectId}/environments`;
+
+  beforeAll(async () => {
+    const p = await http().post('/api/v1/projects').set(as('it-devops'))
+      .send({ name: 'Deployable', slug: 'deployable', githubRepo: 'Acme/Deployable' }).expect(201);
+    projectId = p.body.id;
+    stagingId = (await http().post(base()).set(as('it-devops')).send({ name: 'staging', branch: 'develop', domain: 'staging.example.com' }).expect(201)).body.id;
+    prodId = (await http().post(base()).set(as('it-devops')).send({ name: 'production', isProduction: true, branch: 'main', domain: 'app.example.com' }).expect(201)).body.id;
+    await http().post(`/api/v1/projects/${projectId}/members`).set(as('it-devops')).send({ username: 'it-dev-a' }).expect(201);
+  });
+
+  const trigger = (user: string, envId: string, body: object = { commitSha: SHA }, headers: Record<string, string> = {}) =>
+    http().post(`${base()}/${envId}/deployments`).set(as(user)).set(headers).send(body);
+
+  it('a developer member can deploy to non-production, not to production (FR-DEPLOY-6)', async () => {
+    const ok = await trigger('it-dev-a', stagingId).expect(201);
+    expect(ok.body).toMatchObject({ status: 'PENDING', triggerSource: 'manual', imageRef: `ghcr.io/acme/deployable:${SHA}` });
+    expect(enqueued).toContain(ok.body.id);
+    await trigger('it-dev-a', prodId).expect(403);
+  });
+
+  it('devops can deploy to production', async () => {
+    await trigger('it-devops', prodId).expect(201);
+  });
+
+  it('a non-member developer gets 404 and the attempt is audited; the auditor gets 403', async () => {
+    await trigger('it-dev-b', stagingId).expect(404);
+    await trigger('it-auditor', stagingId).expect(403);
+    expect(await auditActions({ action: 'authz.project_denied', actorName: 'it-dev-b', targetId: projectId })).toContain('authz.project_denied:DENIED');
+  });
+
+  it('the Idempotency-Key header prevents a retried request from double-deploying', async () => {
+    const a = await trigger('it-devops', stagingId, { commitSha: SHA }, { 'Idempotency-Key': 'retry-1' }).expect(201);
+    const b = await trigger('it-devops', stagingId, { commitSha: SHA }, { 'Idempotency-Key': 'retry-1' }).expect(201);
+    expect(b.body.id).toBe(a.body.id);
+  });
+
+  it('refuses images outside the environment repository and malformed shas', async () => {
+    await trigger('it-devops', stagingId, { commitSha: SHA, imageRef: 'evil.io/miner:latest' }).expect(400);
+    await trigger('it-devops', stagingId, { commitSha: 'main' }).expect(400);
+    await trigger('it-devops', stagingId, { commitSha: SHA, imageRef: 'ghcr.io/acme/deployable:custom' }).expect(201);
+  });
+
+  it('rollback only accepts a SUCCESS deployment of the same environment, and is role-gated', async () => {
+    const d = await prisma.deployment.create({ data: { environmentId: stagingId, imageRef: 'ghcr.io/acme/deployable:old', commitSha: SHA, status: 'SUCCESS' } });
+    const failed = await prisma.deployment.create({ data: { environmentId: stagingId, imageRef: 'x', commitSha: SHA, status: 'FAILED' } });
+    const prodOk = await prisma.deployment.create({ data: { environmentId: prodId, imageRef: 'ghcr.io/acme/deployable:p', commitSha: SHA, status: 'SUCCESS' } });
+    const url = (id: string, env = stagingId) => `${base()}/${env}/deployments/${id}/rollback`;
+
+    const rb = await http().post(url(d.id)).set(as('it-dev-a')).expect(201);
+    expect(rb.body).toMatchObject({ triggerSource: 'rollback', restoredFromId: d.id, imageRef: 'ghcr.io/acme/deployable:old' });
+    await http().post(url(failed.id)).set(as('it-devops')).expect(404);
+    await http().post(url(prodOk.id)).set(as('it-devops')).expect(404); // a deployment of another environment
+    await http().post(url(prodOk.id, prodId)).set(as('it-dev-a')).expect(403); // developer cannot roll back production
+    await http().post(url(d.id)).set(as('it-auditor')).expect(403);
+  });
+
+  it('members and auditors can read deployment history; non-members cannot', async () => {
+    const list = await http().get(`${base()}/${stagingId}/deployments`).set(as('it-dev-a')).expect(200);
+    expect(list.body.length).toBeGreaterThan(0);
+    expect(list.body[0]).not.toHaveProperty('logs'); // list is summary-only
+    await http().get(`${base()}/${stagingId}/deployments`).set(as('it-auditor')).expect(200);
+    await http().get(`${base()}/${stagingId}/deployments`).set(as('it-dev-b')).expect(404);
+  });
+
+  describe('GitHub webhook', () => {
+    const payload = (over: object = {}) => ({
+      action: 'completed', repository: { full_name: 'acme/deployable' },
+      workflow_run: { name: 'Build image', conclusion: 'success', head_branch: 'develop', head_sha: 'e'.repeat(40), ...over },
+    });
+    const send = (body: object, opts: { secret?: string; event?: string; delivery?: string } = {}) => {
+      const raw = JSON.stringify(body);
+      const sig = `sha256=${createHmac('sha256', opts.secret ?? WH_SECRET).update(raw).digest('hex')}`;
+      return http().post('/api/v1/webhooks/github').set('Content-Type', 'application/json')
+        .set('X-Hub-Signature-256', sig).set('X-GitHub-Event', opts.event ?? 'workflow_run')
+        .set('X-GitHub-Delivery', opts.delivery ?? `del-${Math.random()}`).send(raw);
+    };
+
+    it('rejects a missing or wrong signature, audits it, and creates nothing', async () => {
+      const before = await prisma.deployment.count();
+      await http().post('/api/v1/webhooks/github').set('X-GitHub-Event', 'workflow_run').send(payload()).expect(403);
+      await send(payload(), { secret: 'wrong' }).expect(403);
+      expect(await prisma.deployment.count()).toBe(before);
+      expect(await auditActions({ action: 'webhook.rejected' })).toContain('webhook.rejected:DENIED');
+    });
+
+    it('a signed successful "Build image" run deploys to the environment tracking that branch', async () => {
+      const res = await send(payload(), { delivery: 'delivery-1' }).expect(201);
+      expect(res.body.deployments).toHaveLength(1);
+      const d = await prisma.deployment.findUniqueOrThrow({ where: { id: res.body.deployments[0] } });
+      expect(d).toMatchObject({ environmentId: stagingId, triggerSource: 'webhook', imageRef: `ghcr.io/acme/deployable:${'e'.repeat(40)}`, triggeredById: null });
+      expect(enqueued).toContain(d.id);
+    });
+
+    it('replaying the same delivery cannot double-deploy', async () => {
+      const before = await prisma.deployment.count();
+      const res = await send(payload(), { delivery: 'delivery-1' }).expect(201);
+      expect(res.body.deployments).toEqual([]);
+      expect(await prisma.deployment.count()).toBe(before);
+    });
+
+    it('main-branch runs target production only; unknown branches and repos deploy nothing', async () => {
+      const prod = await send(payload({ head_branch: 'main' })).expect(201);
+      const d = await prisma.deployment.findUniqueOrThrow({ where: { id: prod.body.deployments[0] } });
+      expect(d.environmentId).toBe(prodId);
+      expect((await send(payload({ head_branch: 'feature/x' })).expect(201)).body.deployments).toEqual([]);
+      const other = { ...payload(), repository: { full_name: 'someone/else' } };
+      expect((await send(other).expect(201)).body).toEqual({ ignored: true });
+    });
+
+    it('ignores failed runs, other workflows, other events and ping', async () => {
+      const n = await prisma.deployment.count();
+      expect((await send(payload({ conclusion: 'failure' }))).body).toEqual({ ignored: true });
+      expect((await send(payload({ name: 'lint' }))).body).toEqual({ ignored: true });
+      expect((await send(payload(), { event: 'push' })).body).toEqual({ ignored: true });
+      expect((await send({}, { event: 'ping' })).body).toEqual({ ok: true });
+      expect(await prisma.deployment.count()).toBe(n);
+    });
+
+    it('rejects a malformed head_sha (it is used to build an image reference)', async () => {
+      await send(payload({ head_sha: 'latest; rm -rf /' })).expect(400);
+    });
   });
 });

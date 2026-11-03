@@ -33,6 +33,9 @@ export class CreateEnvironmentDto {
   @IsOptional() @IsBoolean() isProduction?: boolean;
   @IsOptional() @IsString() @Length(1, 100) branch?: string;
   @IsOptional() @Matches(DOMAIN, { message: 'domain must be a valid hostname' }) domain?: string;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(65535) containerPort?: number;
+  @IsOptional() @Matches(/^\/[A-Za-z0-9\/._~-]{0,100}$/, { message: 'healthPath must start with /' }) healthPath?: string;
+  @IsOptional() @Matches(/^[a-z0-9.-]+(:[0-9]+)?(\/[a-z0-9._-]+)+$/, { message: 'imageRepo must be a lowercase registry path, no tag' }) imageRepo?: string;
 }
 
 export const API_KEY_SCOPES = ['deployments:trigger', 'deployments:read'] as const;

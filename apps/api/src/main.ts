@@ -7,7 +7,7 @@ import { loadEnv } from './config/env';
 
 async function bootstrap() {
   const env = loadEnv(); // fail fast before anything starts
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true }) // rawBody: webhook HMAC is computed over the exact bytes;
   configureApp(app, env.webOrigin);
   await app.listen(env.port, '0.0.0.0');
 }
