@@ -3,6 +3,7 @@ import { revalidatePath } from 'next/cache';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { canDeploy, canManageEnvironments, currentRoles } from '@/lib/permissions';
+import { DatabasesCard } from './databases-card';
 import type { DeploymentDto, EnvironmentDto, ProjectDto } from '@aegisops/shared-types';
 
 type Detail = ProjectDto & {
@@ -67,6 +68,18 @@ async function deleteSecret(projectId: string, envId: string, name: string) {
       { method: 'DELETE' },
       { redirectOn401: false },
     );
+  } catch (e) {
+    if (e instanceof ApiError) back(projectId, e.message);
+    throw e;
+  }
+  back(projectId);
+}
+
+/** FR-INFRA-2: the API queues it; the deployer resolves the container itself and re-validates. Same role rule as deploying. */
+async function control(projectId: string, envId: string, action: 'start' | 'stop' | 'restart') {
+  'use server';
+  try {
+    await api(`/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(envId)}/container/${action}`, { method: 'POST' }, { redirectOn401: false });
   } catch (e) {
     if (e instanceof ApiError) back(projectId, e.message);
     throw e;
@@ -166,6 +179,16 @@ export default async function ProjectDetail({
                 </div>
                 {lastGood && <span className="muted">live: <span className="mono">{(lastGood.commitSha ?? '').slice(0, 7) || '—'}</span></span>}
               </div>
+              {lastGood && (
+                <div className="inline" style={{ margin: '6px 0' }}>
+                  <Link href={`/projects/${id}/environments/${e.id}/logs`} data-testid={`logs-${e.name}`}>Logs</Link>
+                  {canDeploy(roles, e.isProduction) && (['restart', 'stop', 'start'] as const).map((a) => (
+                    <form key={a} action={control.bind(null, id, e.id, a)}>
+                      <button className="link" data-testid={`${a}-${e.name}`} style={{ marginLeft: 12 }}>{a[0].toUpperCase() + a.slice(1)}</button>
+                    </form>
+                  ))}
+                </div>
+              )}
               {canDeploy(roles, e.isProduction) && (
               <form action={deploy.bind(null, id, e.id)} className="inline">
                 <div style={{ flex: 1 }}>
@@ -236,6 +259,8 @@ export default async function ProjectDetail({
           );
         })}
       </div>
+
+      <DatabasesCard projectId={id} environments={p.environments} roles={roles} />
 
       {canManageEnvironments(roles) && (
       <form action={createEnvironment.bind(null, id)} className="card">

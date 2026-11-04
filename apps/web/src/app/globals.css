@@ -46,3 +46,8 @@ mono, .mono { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:13
 .big { font-size:24px; font-weight:600; }
 .big[data-bad=true] { color:var(--bad); }
 .links a { white-space:nowrap; }
+select { width:100%; padding:8px 10px; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; font:inherit; }
+.danger { border-color:var(--bad); }
+.danger button { background:var(--bad); }
+.note { color:var(--muted); font-size:13px; margin:6px 0 0; }
+.ok { color:var(--good); }
