@@ -132,19 +132,33 @@ tests:
         alertname: HostMemoryHigh
         exp_alerts: []
 
-  - name: DiskUsageHigh above 85 percent, ignoring tmpfs
+  - name: DiskUsageHigh fires per device above 85 percent; a disk mounted twice counts once; tmpfs and tiny disks are ignored
     interval: 1m
     input_series:
-      - {series: 'node_filesystem_size_bytes{mountpoint="/",fstype="ext4"}',  values: '1000x20'}
-      - {series: 'node_filesystem_avail_bytes{mountpoint="/",fstype="ext4"}', values: '100x20'}    # 90% used
-      - {series: 'node_filesystem_size_bytes{mountpoint="/run",fstype="tmpfs"}',  values: '1000x20'}
-      - {series: 'node_filesystem_avail_bytes{mountpoint="/run",fstype="tmpfs"}', values: '0x20'}  # full, but tmpfs
+      - {series: 'node_filesystem_size_bytes{device="/dev/sda1",mountpoint="/",fstype="ext4"}',        values: '100000000000x20'}
+      - {series: 'node_filesystem_avail_bytes{device="/dev/sda1",mountpoint="/",fstype="ext4"}',       values: '10000000000x20'}     # 90% used
+      - {series: 'node_filesystem_size_bytes{device="/dev/sda1",mountpoint="/var/lib/x",fstype="ext4"}',  values: '100000000000x20'}  # same disk, second mount
+      - {series: 'node_filesystem_avail_bytes{device="/dev/sda1",mountpoint="/var/lib/x",fstype="ext4"}', values: '10000000000x20'}
+      - {series: 'node_filesystem_size_bytes{device="/dev/sdb",mountpoint="/boot",fstype="ext4"}',      values: '500000000x20'}        # tiny (0.5 GB) and full
+      - {series: 'node_filesystem_avail_bytes{device="/dev/sdb",mountpoint="/boot",fstype="ext4"}',     values: '0x20'}
+      - {series: 'node_filesystem_size_bytes{device="tmpfs",mountpoint="/run",fstype="tmpfs"}',         values: '100000000000x20'}
+      - {series: 'node_filesystem_avail_bytes{device="tmpfs",mountpoint="/run",fstype="tmpfs"}',        values: '0x20'}                # full, but tmpfs
     alert_rule_test:
       - eval_time: 10m
         alertname: DiskUsageHigh
         exp_alerts:
-          - exp_labels: { severity: warning, mountpoint: "/", fstype: ext4 }
-            exp_annotations: { summary: "Disk / above 85% (90%)" }
+          - exp_labels: { severity: warning, device: /dev/sda1 }
+            exp_annotations: { summary: "Disk /dev/sda1 above 85% (90%)" }
+
+  - name: DiskUsageHigh stays quiet at 70 percent
+    interval: 1m
+    input_series:
+      - {series: 'node_filesystem_size_bytes{device="/dev/sda1",mountpoint="/",fstype="ext4"}',  values: '100000000000x20'}
+      - {series: 'node_filesystem_avail_bytes{device="/dev/sda1",mountpoint="/",fstype="ext4"}', values: '30000000000x20'}
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: DiskUsageHigh
+        exp_alerts: []
 
   - name: ContainerHighMemory only fires for containers that have a limit
     interval: 1m

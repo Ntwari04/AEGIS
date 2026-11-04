@@ -56,14 +56,18 @@ groups:
         annotations:
           summary: "Host memory above 90% ({{ $value | humanizePercentage }})"
 
+      # Per physical device (a disk mounted at several paths counts once), real filesystems only, ignoring tiny ones (< 2 GB:
+      # boot partitions, VM helper disks).
       - alert: DiskUsageHigh
         expr: |
-          1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|vfat|ramfs"}
-               / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|vfat|ramfs"}) > 0.85
+          max by (device) (
+            (1 - node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs|zfs"} / node_filesystem_size_bytes{fstype=~"ext4|xfs|btrfs|zfs"})
+            and on (device, mountpoint) (node_filesystem_size_bytes{fstype=~"ext4|xfs|btrfs|zfs"} > 2e9)
+          ) > 0.85
         for: 5m
         labels: { severity: warning }
         annotations:
-          summary: "Disk {{ $labels.mountpoint }} above 85% ({{ $value | humanizePercentage }})"
+          summary: "Disk {{ $labels.device }} above 85% ({{ $value | humanizePercentage }})"
 
   - name: certificates
     rules:

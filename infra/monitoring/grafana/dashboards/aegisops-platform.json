@@ -680,8 +680,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "1 - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|vfat|ramfs\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|vfat|ramfs\"}",
-          "legendFormat": "{{mountpoint}}",
+          "expr": "max by (device)((1 - node_filesystem_avail_bytes{${REAL}} / node_filesystem_size_bytes{${REAL}}) and on (device, mountpoint) (node_filesystem_size_bytes{${REAL}} > 2e9))",
+          "legendFormat": "{{device}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
