@@ -117,6 +117,15 @@ describe('monitoring configuration (Phase 4, PRD 6.6)', () => {
     expect(env.templating.list.map((v: any) => v.name)).toEqual(['project', 'environment']);
   });
 
+  it('no query, rule or dashboard contains a leftover template placeholder like \ (they are plain strings, not templates)', () => {
+    const dir = join(root, 'infra/monitoring/grafana/dashboards');
+    const texts = [
+      ...readdirSync(dir).map((f) => ['dashboard ' + f, readFileSync(join(dir, f), 'utf8')] as const),
+      ['alert rules', read('infra/monitoring/prometheus/rules/aegisops.rules.yml')] as const,
+    ];
+    for (const [name, text] of texts) expect({ name, bad: text.match(/\${[A-Z_]+}/g) }).toEqual({ name, bad: null });
+  });
+
   it('Nginx: /metrics is a hard 404 on the public hosts, Grafana has its own TLS host, and unknown hosts are dropped', () => {
     const t = read('infra/nginx/templates/default.conf.template');
     expect((t.match(/location = \/metrics \{ return 404; \}/g) ?? []).length).toBeGreaterThanOrEqual(2);

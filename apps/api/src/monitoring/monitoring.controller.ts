@@ -50,7 +50,7 @@ export class MonitoringClient {
       this.query('count(aegisops_container_up{project=""} == 1)'),
       this.query('count(aegisops_container_up{project=""})'),
       this.query('1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)'),
-      this.query('max((1 - node_filesystem_avail_bytes{${REAL}} / node_filesystem_size_bytes{${REAL}}) and on (device, mountpoint) (node_filesystem_size_bytes{${REAL}} == scalar(max(node_filesystem_size_bytes{${REAL}}))))'),
+      this.query('max((1 - node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs|zfs"} / node_filesystem_size_bytes{fstype=~"ext4|xfs|btrfs|zfs"}) and on (device, mountpoint) (node_filesystem_size_bytes{fstype=~"ext4|xfs|btrfs|zfs"} == scalar(max(node_filesystem_size_bytes{fstype=~"ext4|xfs|btrfs|zfs"}))))'),
     ]);
     return {
       containersUp: up[0]?.value ?? 0, containersTotal: total[0]?.value ?? 0,
