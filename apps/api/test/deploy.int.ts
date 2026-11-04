@@ -94,7 +94,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  for (const env of ['staging', 'rollbacks', 'firstbad', 'noroute', 'inject', 'secretenv']) {
+  for (const env of ['staging', 'rollbacks', 'firstbad', 'noroute', 'inject', 'secretenv', 'cordon']) {
     for (const c of await ops.listManaged('sample', env).catch(() => [])) await ops.remove(c).catch(() => undefined);
   }
   await nginx?.stop().catch(() => undefined);
@@ -270,5 +270,33 @@ describe('secrets and GitHub reporting in the engine', () => {
     const after = await prisma.deployment.findUniqueOrThrow({ where: { id: dep.id } });
     expect(after.status).toBe('ROLLED_BACK');
     expect(reports).toEqual(['failure']);
+  });
+});
+
+describe('cordon (FR-INFRA-3): a cordoned server accepts no new deployments, even one queued before the cordon', () => {
+  it('refuses at run time: nothing is pulled or started, and the live version keeps serving', async () => {
+    const env = await newEnv('cordon', 'cordon.example.com');
+    const live = await deploy(env.id, 'aegisops-sample:good', SHA_A);
+    expect(live.status).toBe('SUCCESS');
+    expect((await get('cordon.example.com')).body).toContain(`version ${SHA_A}`);
+
+    // a deployment was queued, THEN the server was cordoned
+    const queued = await prisma.deployment.create({ data: { environmentId: env.id, imageRef: 'aegisops-sample:good', commitSha: SHA_B } });
+    const server = await prisma.server.create({ data: { name: 'primary', role: 'app', cordoned: true, cordonReason: 'kernel upgrade' } });
+    await engine.run(queued.id);
+
+    const after = await prisma.deployment.findUniqueOrThrow({ where: { id: queued.id } });
+    expect(after.status).toBe('ROLLED_BACK');
+    expect(after.failureReason).toMatch(/cordoned/);
+    expect(after.logs).toMatch(/Previous version .* is still live/);
+    expect(after.containerName).toBeNull();
+    expect(await managed('sample', 'cordon')).toEqual([live.containerName]); // no second container was started
+    expect((await get('cordon.example.com')).body).toContain(`version ${SHA_A}`);
+
+    // uncordon: the same deployment path works again
+    await prisma.server.update({ where: { id: server.id }, data: { cordoned: false, cordonReason: null } });
+    const next = await deploy(env.id, 'aegisops-sample:good', SHA_B);
+    expect(next.status).toBe('SUCCESS');
+    expect((await get('cordon.example.com')).body).toContain(`version ${SHA_B}`);
   });
 });
