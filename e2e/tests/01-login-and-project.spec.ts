@@ -38,7 +38,7 @@ test('platform admin: redirected to Keycloak, enrols TOTP, lands authenticated, 
   }
 
   // 5. Back in AegisOps, authenticated
-  await page.waitForURL(/localhost:13000\/projects/);
+  await page.waitForURL(/\/projects$/);
   await expect(page.getByTestId('whoami')).toContainText(/E2E|e2e/i);
 
   // 6. Create a project
@@ -46,7 +46,7 @@ test('platform admin: redirected to Keycloak, enrols TOTP, lands authenticated, 
   await page.getByTestId('new-project').click();
   await page.locator('#name').fill('E2E Project');
   await page.locator('#slug').fill(slug);
-  await page.locator('#githubRepo').fill('example-org/e2e-demo');
+  await page.locator('#githubRepo').fill(process.env.E2E_GITHUB_REPO ?? 'Ntwari04/AEGIS');
   await page.getByTestId('create-project').click();
   await expect(page.getByTestId('project-name')).toHaveText('E2E Project');
 

@@ -214,11 +214,14 @@ export class WebhooksController {
       throw new BadRequestException('Malformed payload');
     }
 
-    const project = await this.prisma.project.findFirst({ where: { githubRepo: { equals: repoName, mode: 'insensitive' } } });
-    if (!project) return { ignored: true };
-    const envs = await this.prisma.environment.findMany({ where: { projectId: project.id, branch } });
+    // Several projects may link the same repository; a successful build is deployed to each one's environment on that branch.
+    const projects = await this.prisma.project.findMany({ where: { githubRepo: { equals: repoName, mode: 'insensitive' } }, orderBy: { createdAt: 'asc' } });
+    if (projects.length === 0) return { ignored: true };
     const created: string[] = [];
-    for (const env of envs) {
+    const envs = (
+      await this.prisma.environment.findMany({ where: { projectId: { in: projects.map((p) => p.id) }, branch } })
+    ).map((env) => ({ env, project: projects.find((p) => p.id === env.projectId)! }));
+    for (const { env, project } of envs) {
       const repo = imageRepoFor({ ...env, project });
       if (!repo) continue;
       let result: Awaited<ReturnType<DeploymentsService['create']>>;

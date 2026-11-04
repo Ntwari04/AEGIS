@@ -470,6 +470,20 @@ describe('deployments: authorization, idempotency, webhook (PRD 6.4, FR-DEPLOY-1
       expect(await prisma.deployment.count()).toBe(before);
     });
 
+    it('every project linked to the repository is deployed, not just the first one', async () => {
+      const twin = await http().post('/api/v1/projects').set(as('it-devops'))
+        .send({ name: 'Deployable twin', slug: 'deployable-twin', githubRepo: 'acme/DEPLOYABLE' }).expect(201);
+      const twinEnv = (await http().post(`/api/v1/projects/${twin.body.id}/environments`).set(as('it-devops'))
+        .send({ name: 'staging', branch: 'develop', domain: 'twin.example.com' }).expect(201)).body.id;
+      try {
+        const res = await send(payload({ head_sha: 'f'.repeat(40) })).expect(201);
+        const hit = await prisma.deployment.findMany({ where: { id: { in: res.body.deployments } } });
+        expect(hit.map((d) => d.environmentId).sort()).toEqual([stagingId, twinEnv].sort());
+      } finally {
+        await prisma.project.delete({ where: { id: twin.body.id } });
+      }
+    });
+
     it('main-branch runs target production only; unknown branches and repos deploy nothing', async () => {
       const prod = await send(payload({ head_branch: 'main' })).expect(201);
       const d = await prisma.deployment.findUniqueOrThrow({ where: { id: prod.body.deployments[0] } });
