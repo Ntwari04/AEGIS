@@ -20,6 +20,10 @@ if (!existsSync(envPath)) {
 const GENERATED = {
   GRAFANA_ADMIN_PASSWORD: () => randomBytes(24).toString('base64url'),
   GRAFANA_OAUTH_SECRET: () => randomBytes(32).toString('base64url'),
+  AEGIS_BACKUP_DB_PASSWORD: () => randomBytes(24).toString('base64url'),
+  AEGIS_PROVISIONER_DB_PASSWORD: () => randomBytes(24).toString('base64url'),
+  // Encrypts every backup archive. Losing it makes all backups unreadable: back it up OFF this server.
+  BACKUP_ENCRYPTION_KEY: () => randomBytes(32).toString('base64'),
 };
 
 let text = readFileSync(envPath, 'utf8');

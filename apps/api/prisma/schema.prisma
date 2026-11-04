@@ -32,6 +32,23 @@ enum BackupStatus {
   FAILED
 }
 
+enum BackupKind {
+  SCHEDULED
+  MANUAL
+}
+
+enum RestoreKind {
+  RESTORE    // into a NEW database (the default, never destructive)
+  OVERWRITE  // over an existing provisioned database: a separate, separately confirmed operation (FR-DB-4)
+  DRILL      // scheduled proof that backups restore (FR-BACKUP-4)
+}
+
+enum RestoreStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
 enum AuditResult {
   SUCCESS
   DENIED
@@ -89,6 +106,11 @@ model Server {
   ipAddress String?
   cpuCores  Int?
   memoryMb  Int?
+  /// A cordoned server accepts no new deployments (FR-INFRA-3). The typed reason is also written to the audit log.
+  cordoned     Boolean   @default(false)
+  cordonReason String?
+  cordonedAt   DateTime?
+  cordonedById String?
   createdAt DateTime @default(now())
 
   environments Environment[]
@@ -175,11 +197,19 @@ model Deployment {
 }
 
 /// Provisioned-database metadata, not Postgres itself.
+/// A PostgreSQL database + a least-privilege role provisioned for a project (FR-DB-1). The role's password is never stored here:
+/// it lives only in the environment secret DATABASE_URL (encrypted) and in Postgres itself.
 model Database {
-  id        String   @id @default(uuid())
-  projectId String
-  name      String
-  createdAt DateTime @default(now())
+  id            String   @id @default(uuid())
+  projectId     String
+  environmentId String?
+  /// Human label, unique per project.
+  name          String
+  /// The real PostgreSQL database and role names (generated, validated, never user-chosen SQL identifiers).
+  pgName        String   @unique
+  roleName      String   @unique
+  createdById   String?
+  createdAt     DateTime @default(now())
 
   project Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
   backups BackupJob[]
@@ -187,16 +217,51 @@ model Database {
   @@unique([projectId, name])
 }
 
+/// One backup of one target (FR-BACKUP-1..3). target is 'system:aegisops', 'system:keycloak' or 'db:<Database.id>'.
+/// The archive in object storage is gzip'd SQL encrypted with AES-256-GCM; sha256 is of the stored (encrypted) object.
 model BackupJob {
-  id         String       @id @default(uuid())
-  databaseId String
-  status     BackupStatus @default(PENDING)
-  sizeBytes  BigInt?
-  objectKey  String?
-  startedAt  DateTime     @default(now())
-  finishedAt DateTime?
+  id          String       @id @default(uuid())
+  target      String       @default("")
+  databaseId  String?
+  kind        BackupKind   @default(SCHEDULED)
+  status      BackupStatus @default(PENDING)
+  sizeBytes   BigInt?
+  plainBytes  BigInt?
+  sha256      String?
+  objectKey   String?
+  /// Row count per table taken in the SAME snapshot as the dump: the integrity check compares a restore against this.
+  manifest    Json?
+  error       String?
+  triggeredById String?
+  startedAt   DateTime     @default(now())
+  finishedAt  DateTime?
+  /// Set when retention pruned the object; the row stays as history.
+  deletedAt   DateTime?
 
-  database Database @relation(fields: [databaseId], references: [id], onDelete: Cascade)
+  database Database?     @relation(fields: [databaseId], references: [id], onDelete: SetNull)
+  restores RestoreJob[]
+
+  @@index([target, startedAt])
+}
+
+/// A restore of a backup (FR-DB-4) or a scheduled drill (FR-BACKUP-4). durationMs feeds the RTO check.
+model RestoreJob {
+  id             String        @id @default(uuid())
+  backupJobId    String
+  kind           RestoreKind   @default(RESTORE)
+  status         RestoreStatus @default(RUNNING)
+  targetDatabase String
+  requestedById  String?
+  reason         String?
+  startedAt      DateTime      @default(now())
+  finishedAt     DateTime?
+  durationMs     Int?
+  integrity      Json?
+  error          String?
+
+  backup BackupJob @relation(fields: [backupJobId], references: [id], onDelete: Cascade)
+
+  @@index([kind, startedAt])
 }
 
 model ApiKey {

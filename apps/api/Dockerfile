@@ -20,9 +20,9 @@ CMD ["npx", "prisma", "migrate", "deploy"]
 # (Follow-up: slim further with pnpm deploy --prod once the Prisma client layout is settled.)
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
-# openssl is required by the Prisma engine. npm/yarn are not needed at runtime; the copies bundled in
+# openssl is required by the Prisma engine; postgresql16-client (pg_dump, psql) by the data worker, and its major version must match the server's (16). npm/yarn are not needed at runtime; the copies bundled in
 # the base image carry HIGH CVEs.
-RUN apk add --no-cache openssl \
+RUN apk add --no-cache openssl postgresql16-client \
  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg
 COPY --from=build --chown=node:node /repo /repo
 USER node

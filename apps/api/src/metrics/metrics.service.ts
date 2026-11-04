@@ -3,6 +3,13 @@ import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom
 import { PrismaService } from '../prisma/prisma.service';
 import { DEPLOYMENT_QUEUE, type DeploymentQueue } from '../deployments/deployments.controller';
 
+interface BackupSnapshot {
+  lastFinished: Map<string, { status: string }>;
+  lastSuccess: Map<string, { startedAt: Date; sizeBytes: bigint | null }>;
+  lastDrill: Map<string, { status: string }>;
+  lastDrillSuccess: Map<string, { finishedAt: Date | null; durationMs: number | null }>;
+}
+
 /**
  * Prometheus metrics for the platform (FR-MON-1). Label values never come from user input: routes are the matched
  * route PATTERN (not the URL, so ids do not blow up cardinality) and project / environment names come from the database.
@@ -45,6 +52,35 @@ export class MetricsService {
         for (const r of await self.expectedContainers()) this.set({ project: r.project, environment: r.environment, name: r.name }, 1);
       },
     });
+    // Backups and restore drills (FR-BACKUP-5): the alert rules read these. Only targets that exist today are reported, so a deleted
+    // database does not alert forever.
+    const gauge = (name: string, help: string, labelNames: string[], fill: (g: Gauge<string>, d: BackupSnapshot) => void) =>
+      new Gauge({
+        name, help, labelNames, registers: [this.registry],
+        async collect() { this.reset(); fill(this, await self.backupSnapshot()); },
+      });
+    gauge('aegisops_backup_last_status', '1 if the most recent finished backup of the target succeeded, 0 if it failed', ['target'], (g, d) => {
+      for (const [t, r] of d.lastFinished) g.set({ target: t }, r.status === 'SUCCESS' ? 1 : 0);
+    });
+    gauge('aegisops_backup_last_success_timestamp_seconds', 'Unix time the last successful backup of the target started', ['target'], (g, d) => {
+      for (const [t, r] of d.lastSuccess) g.set({ target: t }, r.startedAt.getTime() / 1000);
+    });
+    gauge('aegisops_backup_last_size_bytes', 'Stored (encrypted) size of the last successful backup', ['target'], (g, d) => {
+      for (const [t, r] of d.lastSuccess) if (r.sizeBytes !== null) g.set({ target: t }, Number(r.sizeBytes));
+    });
+    gauge('aegisops_restore_drill_last_status', '1 if the most recent restore drill of the target succeeded (restored AND verified), 0 if not', ['target'], (g, d) => {
+      for (const [t, r] of d.lastDrill) g.set({ target: t }, r.status === 'SUCCESS' ? 1 : 0);
+    });
+    gauge('aegisops_restore_drill_last_success_timestamp_seconds', 'Unix time the last successful restore drill of the target finished', ['target'], (g, d) => {
+      for (const [t, r] of d.lastDrillSuccess) if (r.finishedAt) g.set({ target: t }, r.finishedAt.getTime() / 1000);
+    });
+    gauge('aegisops_restore_drill_duration_seconds', 'How long the last successful restore drill took: the measured restore time', ['target'], (g, d) => {
+      for (const [t, r] of d.lastDrillSuccess) if (r.durationMs !== null) g.set({ target: t }, r.durationMs / 1000);
+    });
+    new Gauge({
+      name: 'aegisops_restore_rto_seconds', help: 'The restore time objective a drill is held to (PRD 7)', registers: [this.registry],
+      collect() { this.set(Number(process.env.BACKUP_RTO_SECONDS ?? 4 * 3600)); },
+    });
     new Gauge({
       name: 'aegisops_deploy_queue_jobs', labelNames: ['state'], registers: [this.registry],
       help: 'Deployment queue depth by BullMQ job state',
@@ -83,6 +119,33 @@ export class MetricsService {
       select: { containerName: true, environment: { select: { name: true, project: { select: { slug: true } } } } },
     });
     return rows.map((r) => ({ project: r.environment.project.slug, environment: r.environment.name, name: r.containerName! }));
+  }
+
+  /** One query set per scrape: latest finished backup, latest success and latest drill, for every target that still exists. */
+  async backupSnapshot(): Promise<BackupSnapshot> {
+    const dbs = await this.prisma.database.findMany({ select: { id: true } });
+    const live = new Set(['system:aegisops', 'system:keycloak', ...dbs.map((d) => `db:${d.id}`)]);
+    const [jobs, drills] = await Promise.all([
+      this.prisma.backupJob.findMany({
+        where: { target: { in: [...live] }, status: { in: ['SUCCESS', 'FAILED'] } }, orderBy: { startedAt: 'desc' }, take: 500,
+        select: { target: true, status: true, startedAt: true, sizeBytes: true },
+      }),
+      this.prisma.restoreJob.findMany({
+        where: { kind: 'DRILL', status: { in: ['SUCCESS', 'FAILED'] }, backup: { target: { in: [...live] } } }, orderBy: { startedAt: 'desc' }, take: 500,
+        select: { status: true, finishedAt: true, durationMs: true, backup: { select: { target: true } } },
+      }),
+    ]);
+    const snap: BackupSnapshot = { lastFinished: new Map(), lastSuccess: new Map(), lastDrill: new Map(), lastDrillSuccess: new Map() };
+    for (const j of jobs) { // newest first: the first row seen per target wins
+      if (!snap.lastFinished.has(j.target)) snap.lastFinished.set(j.target, j);
+      if (j.status === 'SUCCESS' && !snap.lastSuccess.has(j.target)) snap.lastSuccess.set(j.target, j);
+    }
+    for (const r of drills) {
+      const t = r.backup.target;
+      if (!snap.lastDrill.has(t)) snap.lastDrill.set(t, r);
+      if (r.status === 'SUCCESS' && !snap.lastDrillSuccess.has(t)) snap.lastDrillSuccess.set(t, r);
+    }
+    return snap;
   }
 
   render() {

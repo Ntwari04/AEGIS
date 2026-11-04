@@ -43,6 +43,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set in infra/.env}
       AEGISOPS_DB_PASSWORD: ${AEGISOPS_DB_PASSWORD:?set in infra/.env}
       KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set in infra/.env}
+      AEGIS_BACKUP_DB_PASSWORD: ${AEGIS_BACKUP_DB_PASSWORD:?set in infra/.env (node infra/scripts/ensure-secrets.mjs)}
+      AEGIS_PROVISIONER_DB_PASSWORD: ${AEGIS_PROVISIONER_DB_PASSWORD:?set in infra/.env (node infra/scripts/ensure-secrets.mjs)}
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
@@ -393,6 +395,48 @@ services:
     mem_limit: 512m
     security_opt: ["no-new-privileges:true"]
     depends_on: [prometheus, loki]
+    networks:
+      - aegisops-net
+
+  # The data worker: backups, restores, restore drills and retention (Phase 5, PRD 6.7). Like the deployer it has no port and no
+  # HTTP surface; it consumes a queue. It holds what the API deliberately does not: the read-everything backup role, the backup
+  # encryption key and the object-storage credentials. It does NOT mount the Docker socket.
+  data-worker:
+    image: aegisops-api:local
+    container_name: aegisops-data-worker
+    restart: unless-stopped
+    command: ["node", "dist/data-worker.js"]
+    healthcheck:   # the api image's HEALTHCHECK probes :4000; this process has no HTTP surface
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://aegisops:${AEGISOPS_DB_PASSWORD}@postgres:5432/aegisops
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      BACKUP_DB_USER: aegis_backup
+      BACKUP_DB_PASSWORD: ${AEGIS_BACKUP_DB_PASSWORD:?set in infra/.env}
+      # AES-256-GCM key for backup archives: openssl rand -base64 32. LOSING IT MAKES EVERY BACKUP UNREADABLE: keep a copy off this host.
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:?set in infra/.env}
+      BACKUP_RTO_SECONDS: ${BACKUP_RTO_SECONDS:-14400}
+      # Off-host object storage (DigitalOcean Spaces, S3, ...). Unset = backups fail loudly and alert; they are never kept on this disk.
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
     networks:
       - aegisops-net
 

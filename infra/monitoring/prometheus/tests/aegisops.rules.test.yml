@@ -261,11 +261,12 @@ tests:
           - exp_labels: { severity: warning, job: aegisops-api, instance: "api:4000" }
             exp_annotations: { summary: "Monitoring target aegisops-api (api:4000) is not reachable" }
 
-  # --- Backups (Phase 5 publishes these; absent series must never fire) ----------------------------------------------
-  - name: BackupFailed fires on a failed run, and nothing fires while the metric does not exist yet
+  # --- Backups and restore drills (FR-BACKUP-4/5) ---------------------------------------------------------------------
+  - name: BackupFailed fires per target, and only for the target whose last backup failed
     interval: 1m
     input_series:
-      - {series: 'aegisops_backup_last_status', values: '1x5 0x10'}
+      - {series: 'aegisops_backup_last_status{target="system:aegisops"}', values: '1x10'}
+      - {series: 'aegisops_backup_last_status{target="system:keycloak"}', values: '1x5 0x10'}
     alert_rule_test:
       - eval_time: 3m
         alertname: BackupFailed
@@ -273,17 +274,90 @@ tests:
       - eval_time: 10m
         alertname: BackupFailed
         exp_alerts:
-          - exp_labels: { severity: critical }
-            exp_annotations: { summary: "The last backup job failed" }
+          - exp_labels: { severity: critical, target: "system:keycloak" }
+            exp_annotations: { summary: "The last backup of system:keycloak failed" }
 
-  - name: Backup alerts are silent when no backup metrics exist (Phase 5 not run yet)
-    interval: 1m
+  - name: BackupStale fires when the last success is over 26 hours old
+    interval: 1h
     input_series:
-      - {series: 'up{job="x"}', values: '1x20'}
+      - {series: 'aegisops_backup_last_success_timestamp_seconds{target="system:aegisops"}', values: '0x40'}      # success at t=0, never again
+      - {series: 'aegisops_backup_last_success_timestamp_seconds{target="system:keycloak"}', values: '0+3600x40'}  # a fresh success every hour
     alert_rule_test:
-      - eval_time: 10m
-        alertname: BackupFailed
-        exp_alerts: []
-      - eval_time: 10m
+      - eval_time: 20h
         alertname: BackupStale
         exp_alerts: []
+      - eval_time: 30h
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels: { severity: critical, target: "system:aegisops" }
+            exp_annotations: { summary: "No successful backup of system:aegisops in the last 26 hours" }
+
+  - name: NoBackupsHaveRun fires once backups should have started but no series exists
+    interval: 1h
+    input_series:
+      - {series: 'up{job="x"}', values: '1x40'}
+    alert_rule_test:
+      - eval_time: 10h
+        alertname: NoBackupsHaveRun
+        exp_alerts: []
+      - eval_time: 30h
+        alertname: NoBackupsHaveRun
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations: { summary: "No backup has succeeded yet. Check the data worker and object storage." }
+
+  - name: Backup alerts stay silent while backups are healthy
+    interval: 1h
+    input_series:
+      - {series: 'aegisops_backup_last_status{target="system:aegisops"}', values: '1x40'}
+      - {series: 'aegisops_backup_last_success_timestamp_seconds{target="system:aegisops"}', values: '0+3600x40'}
+    alert_rule_test:
+      - eval_time: 30h
+        alertname: BackupFailed
+        exp_alerts: []
+      - eval_time: 30h
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 30h
+        alertname: NoBackupsHaveRun
+        exp_alerts: []
+
+  - name: RestoreDrillFailed fires for the target whose drill failed
+    interval: 1m
+    input_series:
+      - {series: 'aegisops_restore_drill_last_status{target="db:abc"}', values: '1x3 0x10'}
+      - {series: 'aegisops_restore_drill_last_status{target="system:aegisops"}', values: '1x13'}
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RestoreDrillFailed
+        exp_alerts:
+          - exp_labels: { severity: critical, target: "db:abc" }
+            exp_annotations: { summary: "The last restore drill of db:abc FAILED: this backup may not be restorable" }
+
+  - name: RestoreDrillStale fires when no drill has succeeded for over 8 days
+    interval: 1d
+    input_series:
+      - {series: 'aegisops_restore_drill_last_success_timestamp_seconds{target="system:aegisops"}', values: '0x20'}
+      - {series: 'aegisops_restore_drill_last_success_timestamp_seconds{target="system:keycloak"}', values: '0+86400x20'}
+    alert_rule_test:
+      - eval_time: 7d
+        alertname: RestoreDrillStale
+        exp_alerts: []
+      - eval_time: 10d
+        alertname: RestoreDrillStale
+        exp_alerts:
+          - exp_labels: { severity: warning, target: "system:aegisops" }
+            exp_annotations: { summary: "No successful restore drill of system:aegisops in over 8 days" }
+
+  - name: RestoreSlowerThanRto fires only when a drill took longer than the RTO
+    interval: 1m
+    input_series:
+      - {series: 'aegisops_restore_rto_seconds', values: '14400x10'}                                   # 4 hours
+      - {series: 'aegisops_restore_drill_duration_seconds{target="system:aegisops"}', values: '120x10'}  # 2 minutes: fine
+      - {series: 'aegisops_restore_drill_duration_seconds{target="db:slow"}', values: '18000x10'}        # 5 hours: too slow
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RestoreSlowerThanRto
+        exp_alerts:
+          - exp_labels: { severity: critical, target: "db:slow" }
+            exp_annotations: { summary: "Restoring db:slow took 5h 0m 0s, longer than the RTO" }

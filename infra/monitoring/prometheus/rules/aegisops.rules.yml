@@ -132,15 +132,43 @@ groups:
 
   - name: backups
     rules:
-      # FR-BACKUP-5. The backup job (Phase 5) publishes these; until it runs, neither series exists and nothing fires.
+      # FR-BACKUP-5. The API publishes these from the backup records (per target: system:aegisops, system:keycloak, db:<id>).
       - alert: BackupFailed
         expr: aegisops_backup_last_status == 0
         labels: { severity: critical }
         annotations:
-          summary: "The last backup job failed"
+          summary: "The last backup of {{ $labels.target }} failed"
 
       - alert: BackupStale
         expr: time() - aegisops_backup_last_success_timestamp_seconds > 26 * 3600
         labels: { severity: critical }
         annotations:
-          summary: "No successful backup in the last 26 hours"
+          summary: "No successful backup of {{ $labels.target }} in the last 26 hours"
+
+      # No backup has EVER succeeded for any target: the series does not exist, so BackupStale cannot see it.
+      - alert: NoBackupsHaveRun
+        expr: absent(aegisops_backup_last_success_timestamp_seconds)
+        for: 26h
+        labels: { severity: critical }
+        annotations:
+          summary: "No backup has succeeded yet. Check the data worker and object storage."
+
+      # FR-BACKUP-4: an untested backup is not a backup. The weekly drill restores and verifies; these say when it did not.
+      - alert: RestoreDrillFailed
+        expr: aegisops_restore_drill_last_status == 0
+        labels: { severity: critical }
+        annotations:
+          summary: "The last restore drill of {{ $labels.target }} FAILED: this backup may not be restorable"
+
+      - alert: RestoreDrillStale
+        expr: time() - aegisops_restore_drill_last_success_timestamp_seconds > 8 * 86400
+        labels: { severity: warning }
+        annotations:
+          summary: "No successful restore drill of {{ $labels.target }} in over 8 days"
+
+      # PRD 7: a restore must fit inside the RTO. The drill measures it.
+      - alert: RestoreSlowerThanRto
+        expr: aegisops_restore_drill_duration_seconds > scalar(aegisops_restore_rto_seconds)
+        labels: { severity: critical }
+        annotations:
+          summary: "Restoring {{ $labels.target }} took {{ $value | humanizeDuration }}, longer than the RTO"

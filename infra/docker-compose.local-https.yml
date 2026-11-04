@@ -4,6 +4,29 @@
 #
 # The production file stays strict; these two settings exist only because of the local setup.
 services:
+  # A local S3-compatible store for development ONLY. It has no authentication, which is why it lives in this local-only file and
+  # never in the production compose file. Production points S3_* at a real, access-controlled bucket (e.g. DigitalOcean Spaces).
+  s3-local:
+    image: chrislusf/seaweedfs:4.50
+    container_name: aegisops-s3-local
+    restart: unless-stopped
+    command: ["server", "-s3", "-dir=/data", "-volume.max=8", "-master.volumeSizeLimitMB=128"]
+    volumes:
+      - s3-local-data:/data
+    networks:
+      - aegisops-net
+
+  data-worker:
+    environment:
+      S3_ENDPOINT: http://s3-local:8333
+      S3_BUCKET: aegis-backups-local
+      S3_ACCESS_KEY_ID: local
+      S3_SECRET_ACCESS_KEY: local
+      S3_FORCE_PATH_STYLE: "true"
+      S3_ENSURE_BUCKET: "true"
+    depends_on:
+      - s3-local
+
   web:
     environment:
       # Nginx's cert for localtest.me is self-signed, so Node would reject Auth.js's server-side
@@ -17,3 +40,6 @@ services:
     # Docker Desktop exposes docker.sock as root:root (gid 0), not the host "docker" group.
     # On the droplet DOCKER_GID (stat -c %g /var/run/docker.sock) is used instead.
     group_add: ["0"]
+
+volumes:
+  s3-local-data:
