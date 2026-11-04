@@ -59,6 +59,14 @@ beforeAll(async () => {
   // Production-like roles: the backup role reads everything and may create scratch databases, but is not a superuser.
   await sql('postgres', `CREATE ROLE aegis_backup LOGIN PASSWORD 'bk-pass' CREATEDB NOSUPERUSER`);
   await sql('postgres', `GRANT pg_read_all_data TO aegis_backup`);
+  // The provisioner creates roles and databases; createrole_self_grant lets it act as the roles it creates; pg_signal_backend lets
+  // the overwrite swap close connections to a live database. Not a superuser.
+  await sql('postgres', `CREATE ROLE aegis_provisioner LOGIN PASSWORD 'pv-pass' NOSUPERUSER CREATEROLE CREATEDB`);
+  await sql('postgres', `ALTER ROLE aegis_provisioner SET createrole_self_grant = 'set, inherit'`);
+  await sql('postgres', `GRANT pg_signal_backend TO aegis_provisioner`);
+  // As infra/postgres/init/02-data-roles.sh does: nobody but the data roles may connect to the default databases.
+  for (const d of ['postgres', 'template1', 'aegisops']) await sql('postgres', `REVOKE CONNECT ON DATABASE ${d} FROM PUBLIC`);
+  for (const r of ['aegis_backup', 'aegis_provisioner']) await sql('postgres', `GRANT CONNECT ON DATABASE postgres TO ${r}`);
   for (const db of ['sysdb', 'kcdb', 'appdata', 'locked']) {
     await sql('postgres', `CREATE DATABASE ${db}`);
     await sql('postgres', `REVOKE ALL ON DATABASE ${db} FROM PUBLIC`); // like infra/postgres/init
@@ -83,11 +91,12 @@ beforeAll(async () => {
     try { await store.ensureBucket(); await store.list(''); break; } catch (e) { if (i > 30) throw e; await new Promise((r) => setTimeout(r, 1000)); }
   }
 
+  await tools.query({ host: 'localhost', port: 5432, user: 'aegis_provisioner', password: 'pv-pass', database: 'postgres' }, 'CREATE ROLE appdata_role NOLOGIN');
   const project = await prisma.project.create({ data: { name: 'BK', slug: 'bk' } });
   appDbId = (await prisma.database.create({ data: { projectId: project.id, name: 'appdata', pgName: 'appdata', roleName: 'appdata_role' } })).id;
 
   svc = new BackupService(prisma, store, tools, {
-    host: 'localhost', port: 5432, user: 'aegis_backup', password: 'bk-pass',
+    host: 'localhost', port: 5432, user: 'aegis_backup', password: 'bk-pass', provisioner: { user: 'aegis_provisioner', password: 'pv-pass' },
     systemDatabases: { aegisops: 'sysdb', keycloak: 'kcdb' }, encryptionKey: key, rtoSeconds: 4 * 3600, keyPrefix: 'aegisops/',
   }, { record: async (e) => void audit.push({ action: e.action, result: e.result, metadata: e.metadata }) });
 });
@@ -326,5 +335,213 @@ describe('restore drill (FR-BACKUP-4) and retention (FR-BACKUP-3)', () => {
     await expect(svc.restoreToNew(gone.id)).rejects.toThrow(/not restorable/);
     const failed = await prisma.backupJob.findFirstOrThrow({ where: { status: 'FAILED' } });
     await expect(svc.restoreToNew(failed.id)).rejects.toThrow(/not restorable/);
+  });
+});
+
+// ======================================================================================================================
+// Database management (FR-DB-1, FR-DB-4)
+// ======================================================================================================================
+import { DatabaseProvisioner, provisionNames } from '../src/backup/provisioning';
+import { SecretsCrypto } from '../src/secrets/secrets-crypto';
+import { SecretsService } from '../src/secrets/secrets.service';
+
+describe('database provisioning (FR-DB-1)', () => {
+  let secrets: SecretsService;
+  let prov: DatabaseProvisioner;
+  let envId: string;
+  let projectId: string;
+
+  beforeAll(async () => {
+    secrets = SecretsService.withCrypto(prisma as any, new SecretsCrypto(randomBytes(32).toString('base64')));
+    prov = new DatabaseProvisioner(prisma, tools, secrets, { host: 'localhost', port: 5432, user: 'aegis_provisioner', password: 'pv-pass', backupRole: 'aegis_backup', appHost: 'postgres' },
+      { record: async (e) => void audit.push({ action: e.action, result: e.result, metadata: e.metadata }) });
+    projectId = (await prisma.project.create({ data: { name: 'Prov', slug: 'prov' } })).id;
+    envId = (await prisma.environment.create({ data: { projectId, name: 'staging' } })).id;
+  });
+
+  const reserve = async (envOverride: string | null = envId, rand?: string) => {
+    const names = provisionNames('prov', rand);
+    return prisma.database.create({ data: { projectId, environmentId: envOverride, name: `db-${names.pgName}`, ...names, status: 'PROVISIONING' } });
+  };
+  const credentials = async () => {
+    const url = (await secrets.forEnvironment(envId)).find((s) => s.startsWith('DATABASE_URL='))!.slice('DATABASE_URL='.length);
+    const m = /^postgresql:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)$/.exec(url)!;
+    return { url, user: m[1], password: m[2], database: m[5] };
+  };
+  const asApp = (c: { user: string; password: string }, database: string): PgConn => ({ host: 'localhost', port: 5432, user: c.user, password: c.password, database });
+
+  it('generates safe, bounded, unique identifiers from the project slug', () => {
+    const a = provisionNames('My Shop!!', 'abc123');
+    expect(a).toEqual({ pgName: 'app_my_shop_abc123', roleName: 'app_my_shop_abc123_u' });
+    expect(provisionNames('x'.repeat(80), 'abc123').pgName.length).toBeLessThanOrEqual(41);
+    expect(provisionNames('---', 'abc123').pgName).toBe('app_db_abc123');
+    expect(provisionNames('a', 'aaaaaa').pgName).not.toBe(provisionNames('a', 'bbbbbb').pgName);
+  });
+
+  it('creates a role and database; the role is least-privilege and the database is private', async () => {
+    const row = await prov.provision((await reserve()).id, 'user-1');
+    expect(row.status).toBe('READY');
+    const c = await credentials();
+    expect(c.database).toBe(row.pgName);
+    expect(c.user).toBe(row.roleName);
+
+    // it owns exactly its own database and can use it freely
+    await tools.query(asApp(c, row.pgName), 'CREATE TABLE t(id int); INSERT INTO t VALUES (1),(2);');
+    expect((await tools.query(asApp(c, row.pgName), 'SELECT count(*) FROM t')).trim()).toBe('2');
+
+    // ...but it is not a superuser and cannot create databases or roles
+    expect((await tools.query(asApp(c, row.pgName), "SELECT current_setting('is_superuser')")).trim()).toBe('off');
+    await expect(tools.query(asApp(c, row.pgName), 'CREATE DATABASE nope')).rejects.toThrow(/permission denied/);
+    await expect(tools.query(asApp(c, row.pgName), 'CREATE ROLE nope')).rejects.toThrow(/permission denied/);
+    // ...and cannot reach any other database (PUBLIC was revoked, only the owner may connect)
+    for (const other of ['sysdb', 'kcdb', 'appdata', 'aegisops', 'postgres', 'template1']) {
+      await expect(tools.query(asApp(c, other), 'SELECT 1')).rejects.toThrow(/permission denied|not currently accepting/);
+    }
+    // the backup role CAN connect and read, so the database can be backed up
+    expect((await tools.query(asBackup(row.pgName), 'SELECT count(*) FROM t')).trim()).toBe('2');
+    expect(audit.some((a) => a.action === 'database.provision' && a.result === 'SUCCESS')).toBe(true);
+  });
+
+  it('the password lives only in Postgres and in the ENCRYPTED DATABASE_URL secret: never in AegisOps tables, audit or errors', async () => {
+    const c = await credentials();
+    const stored = await prisma.environmentSecret.findFirstOrThrow({ where: { environmentId: envId, name: 'DATABASE_URL' } });
+    expect(stored.valueEnc).not.toContain(c.password);
+    expect(JSON.stringify(await prisma.database.findMany())).not.toContain(c.password);
+    expect(JSON.stringify(audit)).not.toContain(c.password);
+    // the deployer receives it as an environment variable at the next deployment
+    expect(c.url).toMatch(/^postgresql:\/\/app_prov_[0-9a-f]{6}_u:[A-Za-z0-9_-]{43}@postgres:5432\/app_prov_[0-9a-f]{6}$/);
+  });
+
+  it('a failed provision leaves NOTHING behind (no role, no database) and reports the failure without leaking the password', async () => {
+    const taken = provisionNames('prov', 'dead01');
+    await sql('postgres', `CREATE ROLE ${taken.roleName}`); // collides with the role the provisioner wants to create
+    const row = await prov.provision((await reserve(envId, 'dead01')).id, 'user-1');
+    expect(row.status).toBe('FAILED');
+    expect(row.error).toMatch(/already exists/);
+    expect(await dbExists(taken.pgName)).toBe(false);
+    expect(audit.some((a) => a.action === 'database.provision' && a.result === 'ERROR')).toBe(true);
+    await sql('postgres', `DROP ROLE ${taken.roleName}`);
+  });
+
+  it('rolls back the database and role when storing the secret fails', async () => {
+    const broken = new DatabaseProvisioner(prisma, tools, { set: async () => { throw new Error('secret storage is not configured'); } },
+      { host: 'localhost', port: 5432, user: 'aegis_provisioner', password: 'pv-pass', backupRole: 'aegis_backup' });
+    const row = await broken.provision((await reserve(envId, 'dead02')).id);
+    expect(row.status).toBe('FAILED');
+    expect(row.error).toMatch(/not configured/);
+    expect(await dbExists(row.pgName)).toBe(false);
+    expect((await sql('postgres', `SELECT count(*) FROM pg_roles WHERE rolname='${row.roleName}'`)).trim()).toBe('0');
+  });
+
+  it('is idempotent for a READY database, and refuses one with no environment to deliver the connection string to', async () => {
+    const ready = await prisma.database.findFirstOrThrow({ where: { projectId, status: 'READY' } });
+    expect((await prov.provision(ready.id)).status).toBe('READY');
+    await expect(prov.provision((await reserve(null, 'dead03')).id)).rejects.toThrow(/needs an environment/);
+  });
+
+  it('a provisioned database is backed up, and restored to a NEW database that its own role can use', async () => {
+    const ready = await prisma.database.findFirstOrThrow({ where: { projectId, status: 'READY' } });
+    const b = await svc.backup({ kind: 'db', id: ready.id });
+    expect(b.status).toBe('SUCCESS');
+    expect(b.manifest).toMatchObject({ 'public.t': 2 });
+    const r = await svc.restoreToNew(b.id, { requestedById: 'user-1' });
+    expect(r.status).toBe('SUCCESS');
+    const c = await credentials();
+    // owned by the app role: the application can open the restored copy with its own credentials
+    expect((await tools.query(asApp(c, r.targetDatabase), 'SELECT count(*) FROM t')).trim()).toBe('2');
+    await sql('postgres', `DROP DATABASE ${r.targetDatabase}`);
+  });
+});
+
+describe('overwrite restore (FR-DB-4): separate, safe, reversible', () => {
+  let db: { id: string; pgName: string; roleName: string };
+  let cred: { user: string; password: string };
+  let projectId: string;
+
+  const app = (database: string): PgConn => ({ host: 'localhost', port: 5432, user: cred.user, password: cred.password, database });
+
+  beforeAll(async () => {
+    projectId = (await prisma.project.create({ data: { name: 'Over', slug: 'over' } })).id;
+    const envId = (await prisma.environment.create({ data: { projectId, name: 'prod' } })).id;
+    const secrets = SecretsService.withCrypto(prisma as any, new SecretsCrypto(randomBytes(32).toString('base64')));
+    const prov = new DatabaseProvisioner(prisma, tools, secrets, { host: 'localhost', port: 5432, user: 'aegis_provisioner', password: 'pv-pass', backupRole: 'aegis_backup' });
+    const names = provisionNames('over');
+    db = await prisma.database.create({ data: { projectId, environmentId: envId, name: 'main', ...names, status: 'PROVISIONING' } });
+    expect((await prov.provision(db.id)).status).toBe('READY');
+    const url = (await secrets.forEnvironment(envId)).find((s) => s.startsWith('DATABASE_URL='))!;
+    const m = /postgresql:\/\/([^:]+):([^@]+)@/.exec(url)!;
+    cred = { user: m[1], password: m[2] };
+    await tools.query(app(db.pgName), "CREATE TABLE ledger(id serial primary key, note text); INSERT INTO ledger(note) SELECT 'v1 row ' || g FROM generate_series(1, 300) g");
+  });
+
+  const count = async (database: string) => Number((await tools.query(app(database), 'SELECT count(*) FROM ledger')).trim());
+
+  it('refuses system databases', async () => {
+    const sysBackup = await svc.backup(sys);
+    await expect(svc.overwrite(sysBackup.id, { requestedById: 'admin-1', reason: 'because I can' })).rejects.toThrow(/only a provisioned database/);
+  });
+
+  it('takes a safety backup, verifies a staged copy, then swaps: the live database becomes the backup, the old one is kept', async () => {
+    const v1 = await svc.backup({ kind: 'db', id: db.id }); // 300 rows
+    await tools.query(app(db.pgName), "INSERT INTO ledger(note) SELECT 'v2 row ' || g FROM generate_series(1, 200) g");
+    expect(await count(db.pgName)).toBe(500);
+    const backupsBefore = await prisma.backupJob.count({ where: { databaseId: db.id } });
+
+    const r = await svc.overwrite(v1.id, { requestedById: 'admin-1', reason: 'roll back the bad import' });
+    expect(r.error ?? null).toBeNull();
+    expect(r.status).toBe('SUCCESS');
+    expect(r.kind).toBe('OVERWRITE');
+    const integ = r.integrity as any;
+    expect(integ).toMatchObject({ ok: true, checksumVerified: true, authenticated: true, swapped: true });
+    expect(integ.previousDatabase).toMatch(new RegExp(`^${db.pgName}_old_\\d{14}$`));
+
+    // the live database now holds the backup's data (300 rows), under the same name, still owned by the app role
+    expect(await count(db.pgName)).toBe(300);
+    expect((await tools.query(app(db.pgName), "SELECT count(*) FROM ledger WHERE note LIKE 'v2%'")).trim()).toBe('0');
+    // the previous state is not lost: it is kept as <name>_old_<time>, closed to connections
+    expect(await dbExists(integ.previousDatabase)).toBe(true);
+    await expect(tools.query(app(integ.previousDatabase), 'SELECT 1')).rejects.toThrow(/not currently accepting|permission denied/);
+    // an admin recovers it deliberately by reopening it (documented in docs/phase5-data.md); the 500 rows are all still there
+    await sql('postgres', `ALTER DATABASE ${integ.previousDatabase} WITH ALLOW_CONNECTIONS true`);
+    expect((await sql(integ.previousDatabase, 'SELECT count(*) FROM ledger')).trim()).toBe('500');
+    await sql('postgres', `ALTER DATABASE ${integ.previousDatabase} WITH ALLOW_CONNECTIONS false`);
+    // a safety backup of the 500-row state was taken FIRST and can itself be restored
+    const safety = await prisma.backupJob.findUniqueOrThrow({ where: { id: integ.safetyBackupId } });
+    expect(safety).toMatchObject({ status: 'SUCCESS', kind: 'MANUAL', triggeredById: 'admin-1' });
+    expect((safety.manifest as any)['public.ledger']).toBe(500);
+    expect(await prisma.backupJob.count({ where: { databaseId: db.id } })).toBe(backupsBefore + 1);
+    // no staging database is left, the backup role can still back the swapped database up, and it is audited with the reason
+    expect((await sql('postgres', "SELECT count(*) FROM pg_database WHERE datname ~ '^restore_ow_'")).trim()).toBe('0');
+    expect((await svc.backup({ kind: 'db', id: db.id })).status).toBe('SUCCESS');
+    expect(audit.some((a) => a.action === 'backup.overwrite' && a.result === 'SUCCESS' && a.metadata?.reason === 'roll back the bad import')).toBe(true);
+  });
+
+  it('REFUSES to proceed without a safety net: if the current state cannot be backed up, nothing is changed', async () => {
+    const good = await svc.backup({ kind: 'db', id: db.id });
+    await tools.query(app(db.pgName), "INSERT INTO ledger(note) VALUES ('precious live data')");
+    const before = await count(db.pgName);
+    await sql('postgres', `REVOKE CONNECT ON DATABASE ${db.pgName} FROM aegis_backup`); // the safety backup will now fail
+    try {
+      const r = await svc.overwrite(good.id, { requestedById: 'admin-1', reason: 'attempt without a safety net' });
+      expect(r.status).toBe('FAILED');
+      expect(r.error).toMatch(/refused: the safety backup/);
+      expect(await count(db.pgName)).toBe(before); // live data untouched
+      expect((await sql('postgres', "SELECT count(*) FROM pg_database WHERE datname ~ '^restore_ow_'")).trim()).toBe('0'); // staging never created
+    } finally {
+      await sql('postgres', `GRANT CONNECT ON DATABASE ${db.pgName} TO aegis_backup`);
+    }
+  });
+
+  it('a tampered archive fails at the staging step: the live database is never touched and no staging database is left', async () => {
+    const b = await svc.backup({ kind: 'db', id: db.id });
+    const bytes = Buffer.from(await objectBytes(b.objectKey!));
+    bytes[bytes.length - 40] ^= 1;
+    await store.put(b.objectKey!, Readable.from([bytes]));
+    await prisma.backupJob.update({ where: { id: b.id }, data: { sha256: sha(bytes) } }); // checksum matches: the failure is in decryption
+    const before = await count(db.pgName);
+    const r = await svc.overwrite(b.id, { requestedById: 'admin-1', reason: 'restoring a tampered archive' });
+    expect(r.status).toBe('FAILED');
+    expect(await count(db.pgName)).toBe(before);
+    expect((await sql('postgres', "SELECT count(*) FROM pg_database WHERE datname ~ '^restore_ow_'")).trim()).toBe('0');
   });
 });

@@ -208,6 +208,9 @@ model Database {
   /// The real PostgreSQL database and role names (generated, validated, never user-chosen SQL identifiers).
   pgName        String   @unique
   roleName      String   @unique
+  /// PROVISIONING while the data worker creates the role and database, then READY, or FAILED with the reason in error.
+  status        String   @default("READY")
+  error         String?
   createdById   String?
   createdAt     DateTime @default(now())
 

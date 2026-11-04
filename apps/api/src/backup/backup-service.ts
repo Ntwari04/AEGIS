@@ -26,6 +26,8 @@ export interface BackupConfig {
   /** aegis_backup: reads every database (pg_read_all_data) and may CREATE scratch databases. It is not a superuser. */
   user: string;
   password: string;
+  /** aegis_provisioner: used to restore a provisioned database as its own owner and for the confirmed overwrite swap. */
+  provisioner?: { user: string; password: string };
   /** The real PostgreSQL names of the system databases. */
   systemDatabases: Record<SystemTarget, string>;
   encryptionKey: Buffer;
@@ -153,7 +155,7 @@ export class BackupService {
    * chunk while decrypting, applies the dump in a single transaction, then compares exact row counts against the manifest.
    * A DRILL restores to a scratch database and drops it afterwards (FR-BACKUP-4).
    */
-  async restoreToNew(backupJobId: string, opts: { kind?: 'RESTORE' | 'DRILL'; requestedById?: string; reason?: string; targetName?: string } = {}) {
+  async restoreToNew(backupJobId: string, opts: { kind?: 'RESTORE' | 'DRILL' | 'OVERWRITE'; requestedById?: string; reason?: string; targetName?: string } = {}) {
     const kind = opts.kind ?? 'RESTORE';
     const backup = await this.prisma.backupJob.findUniqueOrThrow({ where: { id: backupJobId } });
     if (backup.status !== 'SUCCESS' || backup.deletedAt || !backup.objectKey || !backup.sha256) throw new Error('that backup is not restorable');
@@ -169,12 +171,22 @@ export class BackupService {
     });
     const t0 = Date.now();
     let created = false;
+    // Restoring a provisioned database: create it OWNED BY that database's own role and apply the dump as that role, so the
+    // application can actually use the restored copy. Drills and system targets use the backup role (nothing needs to log in to them).
+    const owner = backup.databaseId && kind !== 'DRILL' && this.cfg.provisioner
+      ? await this.prisma.database.findUnique({ where: { id: backup.databaseId } })
+      : null;
+    const adminConn: PgConn = owner
+      ? { host: this.cfg.host, port: this.cfg.port, user: this.cfg.provisioner!.user, password: this.cfg.provisioner!.password, database: 'postgres' }
+      : this.conn('postgres');
     try {
       await this.verifyChecksum(backup.objectKey, backup.sha256);
-      await this.pg.query(this.conn('postgres'), `CREATE DATABASE ${quoteIdent(name)}`);
+      await this.pg.query(adminConn, `CREATE DATABASE ${quoteIdent(name)}${owner ? ` OWNER ${quoteIdent(owner.roleName)}` : ''}`);
       created = true;
 
-      const restore = this.pg.restore(this.conn(name));
+      const restore = owner
+        ? this.pg.restore({ ...adminConn, database: name }, { role: owner.roleName })
+        : this.pg.restore(this.conn(name));
       await Promise.all([
         pipeline(await this.store.get(backup.objectKey), decryptStream(this.cfg.encryptionKey), createGunzip(), restore.stdin),
         restore.done,
@@ -196,8 +208,53 @@ export class BackupService {
       return failed;
     } finally {
       // A drill never leaves its scratch database behind; a failed restore never leaves a half-restored one.
-      const keep = kind === 'RESTORE' && (await this.prisma.restoreJob.findUnique({ where: { id: rj.id } }))?.status === 'SUCCESS';
-      if (created && !keep) await this.pg.query(this.conn('postgres'), `DROP DATABASE IF EXISTS ${quoteIdent(name)}`).catch(() => undefined);
+      const keep = kind !== 'DRILL' && (await this.prisma.restoreJob.findUnique({ where: { id: rj.id } }))?.status === 'SUCCESS';
+      if (created && !keep) await this.pg.query(adminConn, `DROP DATABASE IF EXISTS ${quoteIdent(name)}`).catch(() => undefined);
+    }
+  }
+
+  /**
+   * FR-DB-4: overwrite a LIVE provisioned database with a backup. Never in place, never without a safety net:
+   *   1. a fresh backup of the CURRENT state is taken first, and the overwrite is refused if that fails;
+   *   2. the chosen backup is restored into a NEW database and fully verified (checksum, authentication, exact row counts);
+   *   3. only then are the two swapped by renaming. The previous database is kept as `<name>_old_<time>` until a human drops it.
+   * Callers must already have enforced the separate confirmation and authorisation (platform_admin, typed name, reason).
+   */
+  async overwrite(backupJobId: string, opts: { requestedById: string; reason: string }) {
+    const backup = await this.prisma.backupJob.findUniqueOrThrow({ where: { id: backupJobId } });
+    if (!backup.databaseId || !this.cfg.provisioner) throw new Error('only a provisioned database can be overwritten');
+    const db = await this.prisma.database.findUniqueOrThrow({ where: { id: backup.databaseId } });
+    if (db.status !== 'READY') throw new Error('that database is not ready');
+
+    const fail = (error: string) => this.prisma.restoreJob.create({
+      data: { backupJobId, kind: 'OVERWRITE', status: 'FAILED', targetDatabase: db.pgName, requestedById: opts.requestedById, reason: opts.reason, error, finishedAt: this.now() },
+    });
+
+    const safety = await this.backup({ kind: 'db', id: db.id }, { kind: 'MANUAL', triggeredById: opts.requestedById });
+    if (safety.status !== 'SUCCESS') return fail(`refused: the safety backup of the current state failed (${safety.error ?? 'unknown error'}); nothing was changed`);
+
+    const staging = `restore_ow_${randomBytes(4).toString('hex')}`;
+    const staged = await this.restoreToNew(backupJobId, { kind: 'OVERWRITE', requestedById: opts.requestedById, reason: opts.reason, targetName: staging });
+    if (staged.status !== 'SUCCESS') return staged; // the staging database was already dropped; the live one was never touched
+
+    const admin: PgConn = { host: this.cfg.host, port: this.cfg.port, user: this.cfg.provisioner.user, password: this.cfg.provisioner.password, database: 'postgres' };
+    const previous = `${db.pgName}_old_${stamp(this.now()).replace(/[^0-9]/g, '').slice(0, 14)}`;
+    quoteIdent(previous); // validates length and characters
+    try {
+      await this.pg.runScript(admin, SWAP_SQL, { db: db.pgName, old: previous, staging, backup: this.cfg.user });
+      const done = await this.prisma.restoreJob.update({
+        where: { id: staged.id },
+        data: { integrity: { ...(staged.integrity as object), safetyBackupId: safety.id, previousDatabase: previous, swapped: true } },
+      });
+      await this.audit?.record({ actorId: opts.requestedById, action: 'backup.overwrite', targetType: 'database', targetId: db.id, result: 'SUCCESS', metadata: { backupJobId, reason: opts.reason, safetyBackupId: safety.id, previousDatabase: previous } });
+      return done;
+    } catch (e) {
+      // The swap did not complete: put connections back, drop the staged copy, keep the live database exactly as it was.
+      await this.pg.query(admin, `ALTER DATABASE ${quoteIdent(db.pgName)} WITH ALLOW_CONNECTIONS true`).catch(() => undefined);
+      await this.pg.query(admin, `DROP DATABASE IF EXISTS ${quoteIdent(staging)}`).catch(() => undefined);
+      const failed = await this.prisma.restoreJob.update({ where: { id: staged.id }, data: { status: 'FAILED', error: `swap failed: ${errText(e)}`, finishedAt: this.now() } });
+      await this.audit?.record({ actorId: opts.requestedById, action: 'backup.overwrite', targetType: 'database', targetId: db.id, result: 'ERROR', metadata: { backupJobId, error: errText(e) } });
+      return failed;
     }
   }
 
@@ -251,3 +308,16 @@ export class BackupService {
     return { deleted };
   }
 }
+
+/**
+ * Swap a verified staging database in for the live one. Connections are closed to the live database first, so the application
+ * cannot reconnect between the terminate and the rename; the old copy keeps ALLOW_CONNECTIONS false, so nothing uses it by accident.
+ */
+export const SWAP_SQL = `
+SELECT format('ALTER DATABASE %I WITH ALLOW_CONNECTIONS false', :'db') \\gexec
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :'db' AND pid <> pg_backend_pid() \\g /dev/null
+SELECT format('ALTER DATABASE %I RENAME TO %I', :'db', :'old') \\gexec
+SELECT format('ALTER DATABASE %I RENAME TO %I', :'staging', :'db') \\gexec
+SELECT format('REVOKE ALL ON DATABASE %I FROM PUBLIC', :'db') \\gexec
+SELECT format('GRANT CONNECT ON DATABASE %I TO %I', :'db', :'backup') \\gexec
+`;

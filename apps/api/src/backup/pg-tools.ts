@@ -69,6 +69,23 @@ export class PgTools {
     return { stdin: p.stdin, done };
   }
 
+  /**
+   * Runs a multi-statement psql script from stdin. `vars` become psql variables, written into the script (never into argv, so
+   * they cannot show up in a process list) and restricted to URL-safe characters, so a value can never break out of its quotes.
+   */
+  async runScript(conn: PgConn, script: string, vars: Record<string, string> = {}): Promise<void> {
+    for (const [k, v] of Object.entries(vars)) {
+      if (!/^[a-z_][a-z0-9_]*$/.test(k) || !/^[A-Za-z0-9_-]+$/.test(v)) throw new Error('refusing an unsafe psql variable');
+    }
+    const p = this.start('psql', ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-f', '-'], conn);
+    p.stdout.resume();
+    const done = this.watch(p, 'psql script');
+    const setVars = Object.entries(vars).map(([k, v]) => `\\set ${k} '${v}'\n`).join('');
+    p.stdin.write(setVars + script + '\n');
+    p.stdin.end();
+    await done;
+  }
+
   openSession(conn: PgConn): PgSession {
     return new PgSession(this.start('psql', ['-X', '-At', '-v', 'ON_ERROR_STOP=1'], conn), (p) => this.watch(p, 'psql session'));
   }
