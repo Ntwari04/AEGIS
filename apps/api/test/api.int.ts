@@ -40,6 +40,7 @@ const monitoring = {
   alerts: [{ name: 'HostMemoryHigh', severity: 'warning', summary: 'Host memory above 90%', since: new Date().toISOString() }] as any[],
 };
 const enqueued: string[] = [];
+const dataJobs: { name: string; data: any }[] = [];
 const WH_SECRET = 'integration-webhook-secret';
 
 function realmForTests() {
@@ -111,6 +112,7 @@ beforeAll(async () => {
   const { DEPLOYMENT_QUEUE } = await import('../src/deployments/deployments.controller');
   const { GITHUB_APP } = await import('../src/github/github-app');
   const { MonitoringClient } = await import('../src/monitoring/monitoring.controller');
+  const { DATA_JOB_QUEUE } = await import('../src/backup/data-jobs');
   const mod = await Test.createTestingModule({ imports: [AppModule] })
     // The GitHub App is installed on every repository except acme/not-installed.
     .overrideProvider(GITHUB_APP).useValue({ repoAccessible: async (repo: string) => repo !== 'acme/not-installed' })
@@ -124,6 +126,7 @@ beforeAll(async () => {
       platformSummary: async () => ({ containersUp: 17, containersTotal: 17, hostMemoryUsed: 0.4, diskUsed: 0.5 }),
       alerts: async () => monitoring.alerts,
     })
+    .overrideProvider(DATA_JOB_QUEUE).useValue({ enqueue: async (j: { name: string; data: any }) => void dataJobs.push(j) })
     .overrideProvider(DEPLOYMENT_QUEUE).useValue({ enqueue: async (id: string) => void enqueued.push(id) })
     .compile();
   app = mod.createNestApplication<NestExpressApplication>({ rawBody: true });
@@ -776,5 +779,211 @@ describe('monitoring overview: visibility, links and degradation (FR-DASH-1..4)'
 
   it('requires authentication', async () => {
     await http().get('/api/v1/monitoring/overview').expect(401);
+  });
+});
+
+describe('database management and backups API: roles, confirmation and no leakage (FR-DB-1..4)', () => {
+  let projectId: string;
+  let stagingId: string;
+  let prodId: string;
+  let otherProjectId: string;
+  let otherEnvId: string;
+  let dbId: string;
+  let okBackup: string;
+  let failedBackup: string;
+  let expiredBackup: string;
+  let otherDbBackup: string;
+  const base = () => `/api/v1/projects/${projectId}/databases`;
+  const jobs = () => dataJobs.filter((j) => j.name !== 'noop');
+  const lastJob = () => dataJobs[dataJobs.length - 1];
+
+  beforeAll(async () => {
+    projectId = (await http().post('/api/v1/projects').set(as('it-devops')).send({ name: 'Data', slug: 'data-proj' }).expect(201)).body.id;
+    stagingId = (await http().post(`/api/v1/projects/${projectId}/environments`).set(as('it-devops')).send({ name: 'staging' }).expect(201)).body.id;
+    prodId = (await http().post(`/api/v1/projects/${projectId}/environments`).set(as('it-devops')).send({ name: 'production', isProduction: true }).expect(201)).body.id;
+    otherProjectId = (await http().post('/api/v1/projects').set(as('it-admin')).send({ name: 'Data Other', slug: 'data-other' }).expect(201)).body.id;
+    otherEnvId = (await http().post(`/api/v1/projects/${otherProjectId}/environments`).set(as('it-admin')).send({ name: 'staging' }).expect(201)).body.id;
+    await http().post(`/api/v1/projects/${projectId}/members`).set(as('it-devops')).send({ username: 'it-dev-a' }).expect(201);
+
+    // a READY database with backups in each state, as the data worker would have left them
+    const db = await prisma.database.create({ data: { projectId, environmentId: stagingId, name: 'main', pgName: 'app_data_aaaaaa', roleName: 'app_data_aaaaaa_u', status: 'READY' } });
+    dbId = db.id;
+    const mk = (extra: object) => prisma.backupJob.create({ data: { target: `db:${db.id}`, databaseId: db.id, objectKey: 'secret/path/archive.enc', sha256: 'f'.repeat(64), manifest: { 'public.t': 1 }, ...extra } });
+    okBackup = (await mk({ status: 'SUCCESS', sizeBytes: BigInt(1234), plainBytes: BigInt(9999), finishedAt: new Date() })).id;
+    failedBackup = (await mk({ status: 'FAILED', error: 'pg_dump failed', finishedAt: new Date() })).id;
+    expiredBackup = (await mk({ status: 'SUCCESS', deletedAt: new Date(), finishedAt: new Date() })).id;
+    const otherDb = await prisma.database.create({ data: { projectId: otherProjectId, environmentId: otherEnvId, name: 'theirs', pgName: 'app_data_bbbbbb', roleName: 'app_data_bbbbbb_u', status: 'READY' } });
+    otherDbBackup = (await prisma.backupJob.create({ data: { target: `db:${otherDb.id}`, databaseId: otherDb.id, status: 'SUCCESS', objectKey: 'x', sha256: 'e'.repeat(64), finishedAt: new Date() } })).id;
+  });
+
+  describe('provisioning (FR-DB-1)', () => {
+    it('only a platform admin or a devops engineer of the project can provision; developers and auditors cannot', async () => {
+      const body = { name: 'orders', environmentId: prodId };
+      await http().post(base()).set(as('it-dev-a')).send(body).expect(403);
+      await http().post(base()).set(as('it-auditor')).send(body).expect(403);
+      await http().post(base()).send(body).expect(401);
+    });
+
+    it('queues provisioning, reserves generated names, and never returns internal names or credentials', async () => {
+      const before = dataJobs.length;
+      const res = await http().post(base()).set(as('it-devops')).send({ name: 'orders', environmentId: prodId }).expect(202);
+      expect(res.body).toMatchObject({ name: 'orders', environmentId: prodId, status: 'PROVISIONING' });
+      expect(JSON.stringify(res.body)).not.toMatch(/app_data|_u\b|postgres/);
+      expect(dataJobs.length).toBe(before + 1);
+      expect(lastJob()).toMatchObject({ name: 'provision-db', data: { databaseId: res.body.id } });
+      const row = await prisma.database.findUniqueOrThrow({ where: { id: res.body.id } });
+      expect(row.pgName).toMatch(/^app_data_proj_[0-9a-f]{6}$/);
+      expect(row.roleName).toBe(`${row.pgName}_u`);
+      expect(row.status).toBe('PROVISIONING');
+      expect(await auditActions({ action: 'database.request' })).toContain('database.request:SUCCESS');
+    });
+
+    it('validates the input and refuses duplicates, wrong-project environments and a pre-existing DATABASE_URL', async () => {
+      await http().post(base()).set(as('it-devops')).send({ name: 'Bad Name!', environmentId: stagingId }).expect(400);
+      await http().post(base()).set(as('it-devops')).send({ name: 'x', environmentId: 'not-a-uuid' }).expect(400);
+      await http().post(base()).set(as('it-devops')).send({ name: 'orders2', environmentId: otherEnvId }).expect(404); // another project's environment
+      await http().post(base()).set(as('it-devops')).send({ name: 'again', environmentId: prodId }).expect(409);       // production already has one
+      await http().post(base()).set(as('it-devops')).send({ name: 'main', environmentId: stagingId }).expect(409);     // staging already has 'main'
+      // an environment that already has a DATABASE_URL secret is not silently overwritten
+      const env3 = (await http().post(`/api/v1/projects/${projectId}/environments`).set(as('it-devops')).send({ name: 'qa' }).expect(201)).body.id;
+      await http().put(`/api/v1/projects/${projectId}/environments/${env3}/secrets/DATABASE_URL`).set(as('it-devops')).send({ value: 'postgresql://x' }).expect(200);
+      await http().post(base()).set(as('it-devops')).send({ name: 'qadb', environmentId: env3 }).expect(409);
+    });
+
+    it('a failed earlier attempt does not block a retry', async () => {
+      const env4 = (await http().post(`/api/v1/projects/${projectId}/environments`).set(as('it-devops')).send({ name: 'retry' }).expect(201)).body.id;
+      const first = await http().post(base()).set(as('it-devops')).send({ name: 'retrydb', environmentId: env4 }).expect(202);
+      await prisma.database.update({ where: { id: first.body.id }, data: { status: 'FAILED', error: 'boom' } });
+      await http().post(base()).set(as('it-devops')).send({ name: 'retrydb2', environmentId: env4 }).expect(202);
+    });
+
+    it('listing is visible to project members (developers see status, never internals); non-members get 404', async () => {
+      const res = await http().get(base()).set(as('it-dev-a')).expect(200);
+      expect(res.body.length).toBeGreaterThanOrEqual(2);
+      for (const d of res.body) expect(Object.keys(d).sort()).toEqual(['createdAt', 'environmentId', 'error', 'id', 'name', 'status']);
+      await http().get(base()).set(as('it-dev-b')).expect(404);
+    });
+  });
+
+  describe('backup history and on-demand backups (FR-DB-3)', () => {
+    it('history is for platform admins, auditors and the project devops engineer; developers are refused; non-members get 404', async () => {
+      for (const u of ['it-devops', 'it-admin', 'it-auditor']) await http().get(`${base()}/${dbId}/backups`).set(as(u)).expect(200);
+      await http().get(`${base()}/${dbId}/backups`).set(as('it-dev-a')).expect(403);
+      await http().get(`${base()}/${dbId}/backups`).set(as('it-dev-b')).expect(403);
+    });
+
+    it('history shows status, size and errors, but never the storage key, checksum or manifest', async () => {
+      const res = await http().get(`${base()}/${dbId}/backups`).set(as('it-devops')).expect(200);
+      const byId = Object.fromEntries(res.body.backups.map((b: any) => [b.id, b]));
+      expect(byId[okBackup]).toMatchObject({ status: 'SUCCESS', sizeBytes: 1234, plainBytes: 9999, expired: false });
+      expect(byId[failedBackup]).toMatchObject({ status: 'FAILED', error: 'pg_dump failed' });
+      expect(byId[expiredBackup].expired).toBe(true);
+      const text = JSON.stringify(res.body);
+      for (const secret of ['secret/path', 'ffffffff', 'objectKey', 'sha256', 'manifest', 'public.t']) expect(text).not.toContain(secret);
+    });
+
+    it("a project's backups are not visible through another project's URL", async () => {
+      const theirs = await prisma.database.findFirstOrThrow({ where: { projectId: otherProjectId } });
+      await http().get(`${base()}/${theirs.id}/backups`).set(as('it-devops')).expect(404);
+    });
+
+    it('on-demand backup: devops engineer or admin; queued, audited; refused for developers/auditors and not-ready databases', async () => {
+      const before = dataJobs.length;
+      await http().post(`${base()}/${dbId}/backups`).set(as('it-devops')).expect(202);
+      await http().post(`${base()}/${dbId}/backups`).set(as('it-admin')).expect(202);
+      expect(dataJobs.length).toBe(before + 2);
+      expect(lastJob()).toMatchObject({ name: 'backup', data: { target: `db:${dbId}` } });
+      await http().post(`${base()}/${dbId}/backups`).set(as('it-dev-a')).expect(403);
+      await http().post(`${base()}/${dbId}/backups`).set(as('it-auditor')).expect(403);
+      expect(await auditActions({ action: 'backup.request' })).toContain('backup.request:SUCCESS');
+      const pending = (await http().get(base()).set(as('it-devops'))).body.find((d: any) => d.status === 'PROVISIONING');
+      await http().post(`${base()}/${pending.id}/backups`).set(as('it-devops')).expect(409);
+    });
+  });
+
+  describe('restore to a NEW database (FR-DB-4)', () => {
+    it('devops engineers and admins can queue it; developers and auditors cannot', async () => {
+      const before = dataJobs.length;
+      await http().post(`${base()}/${dbId}/backups/${okBackup}/restore`).set(as('it-devops')).send({ reason: 'inspect last night' }).expect(202);
+      expect(lastJob()).toMatchObject({ name: 'restore', data: { backupJobId: okBackup, reason: 'inspect last night' } });
+      await http().post(`${base()}/${dbId}/backups/${okBackup}/restore`).set(as('it-dev-a')).send({}).expect(403);
+      await http().post(`${base()}/${dbId}/backups/${okBackup}/restore`).set(as('it-auditor')).send({}).expect(403);
+      expect(dataJobs.length).toBe(before + 1);
+    });
+
+    it('only a successful, unexpired backup of THAT database can be restored', async () => {
+      await http().post(`${base()}/${dbId}/backups/${failedBackup}/restore`).set(as('it-devops')).send({}).expect(409);
+      await http().post(`${base()}/${dbId}/backups/${expiredBackup}/restore`).set(as('it-devops')).send({}).expect(409);
+      await http().post(`${base()}/${dbId}/backups/${otherDbBackup}/restore`).set(as('it-devops')).send({}).expect(404); // another project's backup
+      await http().post(`${base()}/${dbId}/backups/00000000-0000-0000-0000-000000000000/restore`).set(as('it-devops')).send({}).expect(404);
+    });
+  });
+
+  describe('overwrite: a separate, confirmed, admin-only step (FR-DB-4)', () => {
+    const url = () => `${base()}/${dbId}/backups/${okBackup}/overwrite`;
+    const good = { confirm: 'main', reason: 'roll back the bad import' };
+
+    it('is platform_admin ONLY: a devops engineer of the project, a developer and an auditor are all refused', async () => {
+      const before = dataJobs.length;
+      for (const u of ['it-devops', 'it-dev-a', 'it-auditor']) await http().post(url()).set(as(u)).send(good).expect(403);
+      expect(dataJobs.length).toBe(before); // nothing was queued
+    });
+
+    it('needs the database name typed back and a real reason', async () => {
+      const before = dataJobs.length;
+      await http().post(url()).set(as('it-admin')).send({ confirm: 'Main', reason: good.reason }).expect(400);
+      await http().post(url()).set(as('it-admin')).send({ confirm: 'wrong', reason: good.reason }).expect(400);
+      await http().post(url()).set(as('it-admin')).send({ confirm: 'main', reason: 'short' }).expect(400);
+      await http().post(url()).set(as('it-admin')).send({ confirm: 'main' }).expect(400);
+      await http().post(url()).set(as('it-admin')).send({ reason: good.reason }).expect(400);
+      expect(dataJobs.length).toBe(before);
+    });
+
+    it('queues exactly one overwrite job with the reason, and audits the request', async () => {
+      const before = dataJobs.length;
+      await http().post(url()).set(as('it-admin')).send(good).expect(202);
+      expect(dataJobs.length).toBe(before + 1);
+      expect(lastJob()).toMatchObject({ name: 'overwrite', data: { backupJobId: okBackup, reason: good.reason } });
+      expect(await auditActions({ action: 'backup.overwrite.request' })).toContain('backup.overwrite.request:SUCCESS');
+    });
+
+    it('cannot overwrite from a failed, expired or foreign backup', async () => {
+      for (const b of [failedBackup, expiredBackup]) await http().post(`${base()}/${dbId}/backups/${b}/overwrite`).set(as('it-admin')).send(good).expect(409);
+      await http().post(`${base()}/${dbId}/backups/${otherDbBackup}/overwrite`).set(as('it-admin')).send(good).expect(404);
+    });
+  });
+
+  describe('system databases, drills and restore history (FR-BACKUP-4/5)', () => {
+    it('the overview is for platform admins and auditors only', async () => {
+      for (const u of ['it-admin', 'it-auditor']) {
+        const res = await http().get('/api/v1/backups/overview').set(as(u)).expect(200);
+        expect(res.body.targets.map((t: any) => t.target)).toEqual(['system:aegisops', 'system:keycloak']);
+        expect(res.body.rtoSeconds).toBe(14400);
+      }
+      for (const u of ['it-devops', 'it-dev-a']) await http().get('/api/v1/backups/overview').set(as(u)).expect(403);
+    });
+
+    it('only a platform admin can back up a system database or start a drill', async () => {
+      const before = dataJobs.length;
+      await http().post('/api/v1/backups/system/aegisops').set(as('it-admin')).expect(202);
+      await http().post('/api/v1/backups/system/keycloak').set(as('it-admin')).expect(202);
+      await http().post('/api/v1/backups/drill').set(as('it-admin')).expect(202);
+      expect(dataJobs.slice(before).map((j) => j.name)).toEqual(['backup', 'backup', 'drill']);
+      await http().post('/api/v1/backups/system/nothing').set(as('it-admin')).expect(404);
+      await http().post('/api/v1/backups/system/aegisops%27;DROP').set(as('it-admin')).expect(404);
+      for (const u of ['it-devops', 'it-dev-a', 'it-auditor']) {
+        await http().post('/api/v1/backups/system/aegisops').set(as(u)).expect(403);
+        await http().post('/api/v1/backups/drill').set(as(u)).expect(403);
+      }
+    });
+
+    it('restore history is for platform admins and auditors, and is bounded', async () => {
+      await prisma.restoreJob.create({ data: { backupJobId: okBackup, kind: 'DRILL', status: 'SUCCESS', targetDatabase: 'drill_aaaaaaaa', durationMs: 1500, finishedAt: new Date(), integrity: { ok: true, tables: 3, rows: 10, withinRto: true } } });
+      const res = await http().get('/api/v1/restores?limit=5').set(as('it-auditor')).expect(200);
+      expect(res.body.length).toBeLessThanOrEqual(5);
+      expect(res.body[0]).toMatchObject({ kind: 'DRILL', status: 'SUCCESS', durationMs: 1500, integrity: { ok: true, withinRto: true } });
+      expect((await http().get('/api/v1/restores?limit=100000').set(as('it-admin')).expect(200)).body.length).toBeLessThanOrEqual(100);
+      await http().get('/api/v1/restores').set(as('it-devops')).expect(403);
+    });
   });
 });

@@ -419,6 +419,10 @@ services:
       PG_PORT: "5432"
       BACKUP_DB_USER: aegis_backup
       BACKUP_DB_PASSWORD: ${AEGIS_BACKUP_DB_PASSWORD:?set in infra/.env}
+      PROVISIONER_DB_USER: aegis_provisioner
+      PROVISIONER_DB_PASSWORD: ${AEGIS_PROVISIONER_DB_PASSWORD:?set in infra/.env}
+      # Encrypts the DATABASE_URL secret written when a database is provisioned (same key the API uses for environment secrets).
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
       # AES-256-GCM key for backup archives: openssl rand -base64 32. LOSING IT MAKES EVERY BACKUP UNREADABLE: keep a copy off this host.
       BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:?set in infra/.env}
       BACKUP_RTO_SECONDS: ${BACKUP_RTO_SECONDS:-14400}

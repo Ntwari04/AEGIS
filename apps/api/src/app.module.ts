@@ -15,6 +15,7 @@ import { DeploymentsModule } from './deployments/deployments.controller';
 import { SecretsModule } from './secrets/secrets.controller';
 import { MetricsModule } from './metrics/metrics.controller';
 import { MonitoringModule } from './monitoring/monitoring.controller';
+import { DataModule } from './backup/data.controller';
 import { HealthModule } from './health/health.controller';
 import { AllExceptionsFilter } from './common/http-exception.filter';
 
@@ -38,6 +39,7 @@ class CoreModule {}
     SecretsModule,
     MetricsModule,
     MonitoringModule,
+    DataModule,
     HealthModule,
   ],
   providers: [
