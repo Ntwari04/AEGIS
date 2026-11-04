@@ -1,5 +1,5 @@
 # Build context is the repository root (see infra/docker-compose.yml).
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 RUN apk add --no-cache openssl && corepack enable
 WORKDIR /repo
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
@@ -18,7 +18,7 @@ CMD ["npx", "prisma", "migrate", "deploy"]
 
 # Runtime image: a fresh stage, so build-time layers (pnpm store, corepack cache) are not shipped.
 # (Follow-up: slim further with pnpm deploy --prod once the Prisma client layout is settled.)
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 ENV NODE_ENV=production
 # openssl is required by the Prisma engine; postgresql16-client (pg_dump, psql) by the data worker, and its major version must match the server's (16). npm/yarn are not needed at runtime; the copies bundled in
 # the base image carry HIGH CVEs.
