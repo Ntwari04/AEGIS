@@ -132,6 +132,7 @@ services:
       GITHUB_DEPLOY_WORKFLOW: ${GITHUB_DEPLOY_WORKFLOW:-Build image}
       # Dashboard health data (FR-DASH-3): read from Prometheus / Alertmanager on the internal network
       PROMETHEUS_URL: http://prometheus:9090
+      LOKI_URL: http://loki:3100                 # project log search (FR-INFRA-2): Loki is internal only
       ALERTMANAGER_URL: http://alertmanager:9093
       GRAFANA_PUBLIC_URL: https://grafana.${DOMAIN}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-0}

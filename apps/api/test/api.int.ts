@@ -41,6 +41,17 @@ const monitoring = {
 };
 const enqueued: string[] = [];
 const dataJobs: { name: string; data: any }[] = [];
+const containerJobs: any[] = [];
+const logCalls: { project: string; environment: string; opts: any }[] = [];
+const infraStub = { lokiDown: false };
+
+/** A signed GitHub "Build image" workflow_run delivery. */
+async function signedWorkflowRun(repo: string, sha: string, branch: string) {
+  const raw = JSON.stringify({ action: 'completed', repository: { full_name: repo }, workflow_run: { name: 'Build image', conclusion: 'success', head_branch: branch, head_sha: sha } });
+  const sig = `sha256=${createHmac('sha256', WH_SECRET).update(raw).digest('hex')}`;
+  return http().post('/api/v1/webhooks/github').set('Content-Type', 'application/json')
+    .set('X-Hub-Signature-256', sig).set('X-GitHub-Event', 'workflow_run').set('X-GitHub-Delivery', `del-${Math.random()}`).send(raw);
+}
 const WH_SECRET = 'integration-webhook-secret';
 
 function realmForTests() {
@@ -113,6 +124,7 @@ beforeAll(async () => {
   const { GITHUB_APP } = await import('../src/github/github-app');
   const { MonitoringClient } = await import('../src/monitoring/monitoring.controller');
   const { DATA_JOB_QUEUE } = await import('../src/backup/data-jobs');
+  const { CONTAINER_JOB_QUEUE } = await import('../src/infra/infra.controller');
   const mod = await Test.createTestingModule({ imports: [AppModule] })
     // The GitHub App is installed on every repository except acme/not-installed.
     .overrideProvider(GITHUB_APP).useValue({ repoAccessible: async (repo: string) => repo !== 'acme/not-installed' })
@@ -124,8 +136,15 @@ beforeAll(async () => {
         return { up: m(monitoring.up), restarting: m(0), cpu: m(0.1), memory: m(1_000_000), memoryLimit: [], restarts1h: m(0), started: m(Date.now() / 1000 - 60) };
       },
       platformSummary: async () => ({ containersUp: 17, containersTotal: 17, hostMemoryUsed: 0.4, diskUsed: 0.5 }),
+      query: async (expr: string) => (expr === 'aegisops_container_up' ? [{ metric: { name: 'aegisops-api', project: '', environment: '' }, value: 1 }] : []),
+      logs: async (project: string, environment: string, opts: any) => {
+        if (infraStub.lokiDown) throw new Error('loki is down');
+        logCalls.push({ project, environment, opts });
+        return [{ ts: new Date().toISOString(), line: 'listening on 3000', container: 'aegis-infra-proj-staging-1' }];
+      },
       alerts: async () => monitoring.alerts,
     })
+    .overrideProvider(CONTAINER_JOB_QUEUE).useValue({ enqueue: async (j: any) => void containerJobs.push(j) })
     .overrideProvider(DATA_JOB_QUEUE).useValue({ enqueue: async (j: { name: string; data: any }) => void dataJobs.push(j) })
     .overrideProvider(DEPLOYMENT_QUEUE).useValue({ enqueue: async (id: string) => void enqueued.push(id) })
     .compile();
@@ -984,6 +1003,187 @@ describe('database management and backups API: roles, confirmation and no leakag
       expect(res.body[0]).toMatchObject({ kind: 'DRILL', status: 'SUCCESS', durationMs: 1500, integrity: { ok: true, withinRto: true } });
       expect((await http().get('/api/v1/restores?limit=100000').set(as('it-admin')).expect(200)).body.length).toBeLessThanOrEqual(100);
       await http().get('/api/v1/restores').set(as('it-devops')).expect(403);
+    });
+  });
+});
+
+describe('infrastructure management: servers, container controls, logs, cordon and drain (FR-INFRA-1..3)', () => {
+  let projectId: string;
+  let stagingId: string;
+  let prodId: string;
+  let serverId: string;
+  const SHA = 'c'.repeat(40);
+  const lastContainerJob = () => containerJobs[containerJobs.length - 1];
+  const deployUrl = (envId: string) => `/api/v1/projects/${projectId}/environments/${envId}/deployments`;
+
+  beforeAll(async () => {
+    projectId = (await http().post('/api/v1/projects').set(as('it-devops')).send({ name: 'Infra', slug: 'infra-proj', githubRepo: 'acme/infra-proj' }).expect(201)).body.id;
+    stagingId = (await http().post(`/api/v1/projects/${projectId}/environments`).set(as('it-devops')).send({ name: 'staging' }).expect(201)).body.id;
+    prodId = (await http().post(`/api/v1/projects/${projectId}/environments`).set(as('it-devops')).send({ name: 'production', isProduction: true }).expect(201)).body.id;
+    await http().post(`/api/v1/projects/${projectId}/members`).set(as('it-devops')).send({ username: 'it-dev-a' }).expect(201);
+  });
+
+  describe('servers (FR-INFRA-1)', () => {
+    it('platform admins, devops engineers and auditors can list servers; developers cannot', async () => {
+      for (const u of ['it-admin', 'it-devops', 'it-auditor']) await http().get('/api/v1/infra/servers').set(as(u)).expect(200);
+      await http().get('/api/v1/infra/servers').set(as('it-dev-a')).expect(403);
+      await http().get('/api/v1/infra/servers').expect(401);
+    });
+
+    it('registers the single droplet as "primary" on first use and shows its containers and environments', async () => {
+      const res = await http().get('/api/v1/infra/servers').set(as('it-admin')).expect(200);
+      const primary = res.body.find((s: any) => s.name === 'primary');
+      expect(primary).toMatchObject({ role: 'app', cordoned: false });
+      expect(primary.environments).toBeGreaterThanOrEqual(2); // environments with no explicit server belong to it
+      expect(primary.containers.map((c: any) => c.name)).toContain('aegisops-api');
+      serverId = primary.id;
+      expect((await http().get('/api/v1/infra/servers').set(as('it-admin'))).body.filter((s: any) => s.name === 'primary')).toHaveLength(1); // idempotent
+    });
+
+    it('registering a server is platform_admin only, validated, and refuses duplicates', async () => {
+      await http().post('/api/v1/infra/servers').set(as('it-devops')).send({ name: 'second' }).expect(403);
+      await http().post('/api/v1/infra/servers').set(as('it-admin')).send({ name: 'Bad Name!' }).expect(400);
+      await http().post('/api/v1/infra/servers').set(as('it-admin')).send({ name: 'second', ipAddress: 'not-an-ip' }).expect(400);
+      await http().post('/api/v1/infra/servers').set(as('it-admin')).send({ name: 'second', cpuCores: 0 }).expect(400);
+      await http().post('/api/v1/infra/servers').set(as('it-admin')).send({ name: 'second', ipAddress: '10.0.0.7', cpuCores: 4, memoryMb: 8192 }).expect(201);
+      await http().post('/api/v1/infra/servers').set(as('it-admin')).send({ name: 'second' }).expect(409);
+    });
+  });
+
+  describe('container controls (FR-INFRA-2)', () => {
+    const ctl = (user: string, envId: string, action: string) => http().post(`/api/v1/projects/${projectId}/environments/${envId}/container/${action}`).set(as(user));
+
+    it('a developer member can restart a NON-production container; the job carries the environment id, never a container name', async () => {
+      const before = containerJobs.length;
+      await ctl('it-dev-a', stagingId, 'restart').expect(202);
+      expect(containerJobs.length).toBe(before + 1);
+      expect(lastContainerJob()).toEqual({ kind: 'environment', environmentId: stagingId, action: 'restart', requestedById: expect.any(String) });
+      expect(await auditActions({ action: 'container.request' })).toContain('container.request:SUCCESS');
+    });
+
+    it('production containers need devops_engineer or platform_admin (same rule as deploying)', async () => {
+      await ctl('it-dev-a', prodId, 'restart').expect(403);
+      await ctl('it-devops', prodId, 'stop').expect(202);
+      await ctl('it-admin', prodId, 'start').expect(202);
+    });
+
+    it('auditors are read-only; non-members get 404; unknown actions are rejected', async () => {
+      const before = containerJobs.length;
+      await ctl('it-auditor', stagingId, 'restart').expect(403);
+      await ctl('it-dev-b', stagingId, 'restart').expect(404);
+      await ctl('it-devops', stagingId, 'kill').expect(400);
+      await ctl('it-devops', stagingId, 'restart; rm -rf /').expect(400);
+      await ctl('it-devops', stagingId, 'exec').expect(400);
+      expect(containerJobs.length).toBe(before);
+    });
+
+    it("an environment of another project is unreachable through this project's URL", async () => {
+      const other = (await http().post('/api/v1/projects').set(as('it-admin')).send({ name: 'Elsewhere', slug: 'elsewhere' }).expect(201)).body.id;
+      const otherEnv = (await http().post(`/api/v1/projects/${other}/environments`).set(as('it-admin')).send({ name: 'staging' }).expect(201)).body.id;
+      await ctl('it-devops', otherEnv, 'restart').expect(404);
+    });
+
+    it('platform containers: platform_admin only, a typed reason, exact allowlisted names', async () => {
+      const plat = (user: string, name: string, action: string, body: object = { reason: 'dashboards stuck, restarting' }) =>
+        http().post(`/api/v1/infra/containers/${name}/${action}`).set(as(user)).send(body);
+      const before = containerJobs.length;
+      await plat('it-admin', 'aegisops-grafana', 'restart').expect(202);
+      expect(lastContainerJob()).toMatchObject({ kind: 'platform', name: 'aegisops-grafana', action: 'restart', reason: 'dashboards stuck, restarting' });
+      await plat('it-admin', 'aegisops-grafana', 'stop').expect(202);
+      for (const u of ['it-devops', 'it-dev-a', 'it-auditor']) await plat(u, 'aegisops-grafana', 'restart').expect(403);
+      await plat('it-admin', 'aegisops-grafana', 'restart', { reason: 'short' }).expect(400);
+      await plat('it-admin', 'aegisops-grafana', 'restart', {}).expect(400);
+      await plat('it-admin', 'tega_rw_backend', 'restart').expect(400);            // someone else's container on this host
+      await plat('it-admin', 'aegisops-deployer', 'restart').expect(400);          // the executor itself
+      await plat('it-admin', 'aegisops-redis', 'stop').expect(400);                // critical: restart only
+      await plat('it-admin', 'aegisops-api', 'stop').expect(400);
+      await plat('it-admin', 'aegisops-nginx', 'restart').expect(202);             // critical, but restart is allowed
+      expect(containerJobs.length).toBe(before + 3);
+    });
+  });
+
+  describe('logs (FR-INFRA-2)', () => {
+    const logs = (user: string, qs = '') => http().get(`/api/v1/projects/${projectId}/environments/${stagingId}/logs${qs}`).set(as(user));
+
+    it('project members (including developers) and operators can read THEIR environment logs; non-members cannot', async () => {
+      for (const u of ['it-dev-a', 'it-devops', 'it-admin', 'it-auditor']) {
+        const res = await logs(u).expect(200);
+        expect(res.body.lines[0]).toMatchObject({ container: 'aegis-infra-proj-staging-1', line: 'listening on 3000' });
+      }
+      await logs('it-dev-b').expect(404);
+      await http().get(`/api/v1/projects/${projectId}/environments/${stagingId}/logs`).expect(401);
+    });
+
+    it('the query is bound to this project and environment, with bounded size and range', async () => {
+      logCalls.length = 0;
+      await logs('it-dev-a', '?minutes=30&limit=50&q=error').expect(200);
+      expect(logCalls[0]).toEqual({ project: 'infra-proj', environment: 'staging', opts: { minutes: 30, limit: 50, contains: 'error' } });
+      await logs('it-dev-a', '?minutes=0').expect(400);
+      await logs('it-dev-a', '?minutes=100000').expect(400);
+      await logs('it-dev-a', '?limit=501').expect(400);
+      await logs('it-dev-a', `?q=${'x'.repeat(101)}`).expect(400);
+    });
+
+    it('reports log search as unavailable (503) instead of failing opaquely', async () => {
+      infraStub.lokiDown = true;
+      try { await logs('it-dev-a').expect(503); } finally { infraStub.lokiDown = false; }
+    });
+  });
+
+  describe('cordon and drain (FR-INFRA-3)', () => {
+    const act = (action: string, user: string, body: object) => http().post(`/api/v1/infra/servers/${serverId}/${action}`).set(as(user)).send(body);
+    const good = { confirm: 'primary', reason: 'kernel upgrade window' };
+
+    it('are platform_admin only, and need the server name typed back plus a real reason', async () => {
+      const before = containerJobs.length;
+      for (const a of ['cordon', 'uncordon', 'drain']) {
+        for (const u of ['it-devops', 'it-dev-a', 'it-auditor']) await act(a, u, good).expect(403);
+        await act(a, 'it-admin', { confirm: 'Primary', reason: good.reason }).expect(400);
+        await act(a, 'it-admin', { confirm: 'wrong', reason: good.reason }).expect(400);
+        await act(a, 'it-admin', { confirm: 'primary', reason: 'short' }).expect(400);
+        await act(a, 'it-admin', { reason: good.reason }).expect(400);
+      }
+      expect(containerJobs.length).toBe(before);
+      expect((await http().get('/api/v1/infra/servers').set(as('it-admin'))).body.find((s: any) => s.name === 'primary').cordoned).toBe(false);
+    });
+
+    it('a drain on a server that is NOT cordoned is refused', async () => {
+      const before = containerJobs.length;
+      await act('drain', 'it-admin', good).expect(409);
+      expect(containerJobs.length).toBe(before);
+    });
+
+    it('cordoning records who and why in the audit log, and BLOCKS new deployments on every path', async () => {
+      await act('cordon', 'it-admin', good).expect(200);
+      const entry = await prisma.auditLogEntry.findFirstOrThrow({ where: { action: 'server.cordon' }, orderBy: { createdAt: 'desc' } });
+      expect(entry.metadata).toMatchObject({ server: 'primary', reason: 'kernel upgrade window' });
+      expect(entry.actorName).toBe('it-admin');
+
+      // manual deploy, rollback, CI key and webhook: none create a deployment while cordoned
+      const countBefore = await prisma.deployment.count({ where: { environmentId: stagingId } });
+      await http().post(deployUrl(stagingId)).set(as('it-devops')).send({ commitSha: SHA }).expect(409);
+      const ok = await prisma.deployment.create({ data: { environmentId: stagingId, status: 'SUCCESS', imageRef: 'ghcr.io/acme/infra-proj:old', commitSha: SHA } });
+      await http().post(`${deployUrl(stagingId)}/${ok.id}/rollback`).set(as('it-devops')).expect(409);
+      const key = (await http().post(`/api/v1/projects/${projectId}/api-keys`).set(as('it-devops')).send({ name: 'ci', scopes: ['deployments:trigger'] }).expect(201)).body.key;
+      await http().post('/api/v1/ci/deployments').set('X-API-Key', key).send({ environment: 'staging', commitSha: SHA }).expect(409);
+      const hook = await signedWorkflowRun('acme/infra-proj', SHA, 'main');
+      expect(hook.status).toBe(201);
+      expect(hook.body).toEqual({ deployments: [] }); // GitHub's delivery still succeeds, but nothing is deployed
+      expect(await prisma.deployment.count({ where: { environmentId: stagingId } })).toBe(countBefore + 1); // only the SUCCESS row seeded above
+    });
+
+    it('drain then queues exactly one job carrying the reason; existing containers are not touched by the cordon itself', async () => {
+      const before = containerJobs.length;
+      await act('drain', 'it-admin', good).expect(202);
+      expect(containerJobs.length).toBe(before + 1);
+      expect(lastContainerJob()).toMatchObject({ kind: 'drain', serverId, reason: 'kernel upgrade window' });
+      expect(await auditActions({ action: 'server.drain.request' })).toContain('server.drain.request:SUCCESS');
+    });
+
+    it('uncordon re-opens the server: deployments work again', async () => {
+      await act('uncordon', 'it-admin', good).expect(200);
+      await http().post(deployUrl(stagingId)).set(as('it-devops')).send({ commitSha: SHA }).expect(201);
+      expect(await auditActions({ action: 'server.uncordon' })).toContain('server.uncordon:SUCCESS');
     });
   });
 });

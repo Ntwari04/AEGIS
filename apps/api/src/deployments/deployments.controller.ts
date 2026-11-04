@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, Controller, ForbiddenException, Get, Headers, HttpCode, Inject, Injectable, Module,
+  BadRequestException, Body, ConflictException, Controller, ForbiddenException, Get, Headers, HttpCode, Inject, Injectable, Module,
   NotFoundException, OnModuleDestroy, Param, Post, Req, UnauthorizedException,
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
@@ -59,6 +59,18 @@ export class DeploymentsService {
     @Inject(DEPLOYMENT_QUEUE) private readonly queue: DeploymentQueue,
   ) {}
 
+  /**
+   * FR-INFRA-3: a CORDONED server accepts no new deployments. v1 runs on one host, so an environment with no explicit server belongs
+   * to the first registered one. Whatever is already running there keeps running.
+   */
+  async assertSchedulable(environmentId: string) {
+    const env = await this.prisma.environment.findUnique({ where: { id: environmentId }, select: { serverId: true } });
+    const server = env?.serverId
+      ? await this.prisma.server.findUnique({ where: { id: env.serverId } })
+      : await this.prisma.server.findFirst({ orderBy: { createdAt: 'asc' } });
+    if (server?.cordoned) throw new ConflictException(`Server ${server.name} is cordoned and accepts no new deployments`);
+  }
+
   /** Creates the PENDING record and enqueues it. Idempotent on `idempotencyKey` so a retried webhook cannot double-deploy. */
   async create(args: {
     environmentId: string; commitSha: string; imageRef: string; source: 'webhook' | 'manual' | 'rollback' | 'api-key';
@@ -68,6 +80,7 @@ export class DeploymentsService {
       const existing = await this.prisma.deployment.findUnique({ where: { idempotencyKey: args.idempotencyKey } });
       if (existing) return { deployment: existing, created: false };
     }
+    await this.assertSchedulable(args.environmentId);
     const deployment = await this.prisma.deployment.create({
       data: {
         environmentId: args.environmentId, commitSha: args.commitSha, imageRef: args.imageRef, triggerSource: args.source,
@@ -208,10 +221,17 @@ export class WebhooksController {
     for (const env of envs) {
       const repo = imageRepoFor({ ...env, project });
       if (!repo) continue;
-      const { deployment, created: isNew } = await this.svc.create({
-        environmentId: env.id, commitSha: sha, imageRef: `${repo}:${sha}`, source: 'webhook',
-        idempotencyKey: `gh:${delivery}:${env.id}`,
-      });
+      let result: Awaited<ReturnType<DeploymentsService['create']>>;
+      try {
+        result = await this.svc.create({
+          environmentId: env.id, commitSha: sha, imageRef: `${repo}:${sha}`, source: 'webhook',
+          idempotencyKey: `gh:${delivery}:${env.id}`,
+        });
+      } catch (e) {
+        if (e instanceof ConflictException) continue; // cordoned server: no new deployments, and GitHub's delivery still succeeds
+        throw e;
+      }
+      const { deployment, created: isNew } = result;
       if (isNew) {
         created.push(deployment.id);
         await this.audit.record({

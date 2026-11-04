@@ -58,6 +58,26 @@ export class MonitoringClient {
     };
   }
 
+  /**
+   * Recent container logs of ONE project environment from Loki (FR-INFRA-2). The LogQL is fixed: the project and environment come from
+   * the database and are escaped, and the optional filter is a plain substring (`|=`), never a regex or a pipeline stage.
+   */
+  async logs(project: string, environment: string, opts: { minutes: number; limit: number; contains?: string }): Promise<{ ts: string; line: string; container: string }[]> {
+    const base = process.env.LOKI_URL;
+    if (!base) throw new Error('log search is not configured (LOKI_URL)');
+    const esc = (v: string) => v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    if (opts.contains && /[\r\n\0]/.test(opts.contains)) throw new Error('invalid search text');
+    const query = `{project="${esc(project)}", environment="${esc(environment)}"}${opts.contains ? ` |= "${esc(opts.contains)}"` : ''}`;
+    const end = BigInt(Date.now()) * 1_000_000n;
+    const start = end - BigInt(opts.minutes) * 60n * 1_000_000_000n;
+    const body = await this.getJson(`${base}/loki/api/v1/query_range?query=${encodeURIComponent(query)}&start=${start}&end=${end}&limit=${opts.limit}&direction=backward`);
+    const out: { ts: string; line: string; container: string }[] = [];
+    for (const s of (body.data?.result ?? []) as { stream: Record<string, string>; values: [string, string][] }[]) {
+      for (const [ts, line] of s.values) out.push({ ts: new Date(Number(BigInt(ts) / 1_000_000n)).toISOString(), line: line.slice(0, 2000), container: s.stream.container ?? '' });
+    }
+    return out.sort((a, b) => (a.ts < b.ts ? 1 : -1)).slice(0, opts.limit);
+  }
+
   /** Firing alerts. Empty (not an error) when Alertmanager is not configured. */
   async alerts(): Promise<AlertDto[]> {
     if (!this.alertmanager) return [];

@@ -108,6 +108,12 @@ export class DeployEngine {
     try {
       if (!dep.imageRef) return await fail('deployment has no image reference');
 
+      // A cordon applied after this job was queued still wins: nothing is pulled or started, and the live version is untouched.
+      const server = env.serverId
+        ? await this.prisma.server.findUnique({ where: { id: env.serverId } })
+        : await this.prisma.server.findFirst({ orderBy: { createdAt: 'asc' } });
+      if (server?.cordoned) return await fail(`server ${server.name} is cordoned and accepts no new deployments`);
+
       await say(`pulling ${dep.imageRef}`);
       await this.docker.pull(dep.imageRef);
 

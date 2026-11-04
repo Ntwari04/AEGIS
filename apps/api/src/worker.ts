@@ -10,6 +10,7 @@ import { AuditService } from './audit/audit.service';
 import { DeployEngine, DEFAULT_ENGINE_OPTIONS } from './deployments/deploy-engine';
 import { DockerodeOps, NginxRouter } from './deployments/docker-ops';
 import { DEPLOY_QUEUE } from './deployments/deployments.controller';
+import { CONTAINER_QUEUE, ContainerOps } from './deployments/container-ops';
 import { SecretsService } from './secrets/secrets.service';
 import { GitHubApp, GitHubDeployReporter } from './github/github-app';
 
@@ -60,9 +61,13 @@ async function main() {
     concurrency: 1,
   });
   worker.on('failed', (job, err) => console.error(`job ${job?.id} failed: ${err.message}`));
+  // Container controls (FR-INFRA-2/3): the API only enqueues; the executor re-validates and resolves targets itself.
+  const containerOps = new ContainerOps(prisma as never, ops, audit);
+  const containerWorker = new Worker(CONTAINER_QUEUE, (job) => containerOps.run(job.data), { connection: worker.opts.connection, concurrency: 1 });
+  containerWorker.on('failed', (job, err) => console.error(`container job ${job?.name} failed: ${err.message}`));
   console.log('deployer ready');
 
-  const stop = async () => { await worker.close(); await app.close(); process.exit(0); };
+  const stop = async () => { await worker.close(); await containerWorker.close(); await app.close(); process.exit(0); };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
 }

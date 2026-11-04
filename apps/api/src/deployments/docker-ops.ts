@@ -131,6 +131,34 @@ export class DockerodeOps implements DockerOps {
     return list.map((c) => c.Names[0].replace(/^\//, ''));
   }
 
+  // ---- container controls (FR-INFRA-2). Names are resolved by the caller from the database or a fixed allowlist, never from a request. ----
+
+  async labelsOf(name: string): Promise<Record<string, string> | null> {
+    try {
+      return (await this.docker.getContainer(name).inspect()).Config.Labels ?? {};
+    } catch (e) {
+      if ((e as { statusCode?: number }).statusCode === 404) return null;
+      throw e;
+    }
+  }
+
+  async control(name: string, action: 'start' | 'stop' | 'restart') {
+    const c = this.docker.getContainer(name);
+    try {
+      if (action === 'start') await c.start();
+      else if (action === 'stop') await c.stop({ t: 10 });
+      else await c.restart({ t: 10 });
+    } catch (e) {
+      // 304 = already in that state: starting a running container or stopping a stopped one is not an error.
+      if ((e as { statusCode?: number }).statusCode !== 304) throw e;
+    }
+  }
+
+  async listManagedRunning() {
+    const list = await this.docker.listContainers({ filters: { label: ['aegisops.managed=true'], status: ['running'] } });
+    return list.map((c) => c.Names[0].replace(/^\//, ''));
+  }
+
   get raw() {
     return this.docker;
   }
