@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +11,9 @@ const pw = () => randomBytes(24).toString('base64url');
 
 function run(env: string, example = 'A_PASSWORD=CHANGE_ME\nB_SECRET=CHANGE_ME\nSOME_KEY=CHANGE_ME\nOPTIONAL_TOKEN=\nBACKUP_ENCRYPTION_KEY=CHANGE_ME\nGHCR_TOKEN=CHANGE_ME\n') {
   const dir = mkdtempSync(join(tmpdir(), 'aegis-secrets-'));
-  writeFileSync(join(dir, '.env'), env);
+  // A real .env is chmod 600; fixtures must be too, or the audit (correctly) fails them on Linux.
+  writeFileSync(join(dir, '.env'), env, { mode: 0o600 });
+  chmodSync(join(dir, '.env'), 0o600);
   writeFileSync(join(dir, '.env.example'), example);
   const r = spawnSync('node', [script, '--env', join(dir, '.env'), '--example', join(dir, '.env.example')], { encoding: 'utf8' });
   return { code: r.status, out: r.stdout + r.stderr };
@@ -55,6 +57,18 @@ describe('infra/scripts/check-secrets.mjs', () => {
     expect(r.out).toMatch(/WARN +A_PASSWORD: is short/);
     expect(r.out).toMatch(/WARN +GHCR_TOKEN: not set \(optional/);
     expect(r.code).toBe(0);
+  });
+
+  // POSIX only: Windows has no such mode bits. CI (Linux) runs this one.
+  (process.platform === 'win32' ? it.skip : it)('fails a .env that other users can read, and tells you the fix', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aegis-secrets-'));
+    writeFileSync(join(dir, '.env'), good, { mode: 0o644 });
+    chmodSync(join(dir, '.env'), 0o644);
+    writeFileSync(join(dir, '.env.example'), 'A_PASSWORD=CHANGE_ME\n');
+    const r = spawnSync('node', [script, '--env', join(dir, '.env'), '--example', join(dir, '.env.example')], { encoding: 'utf8' });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toMatch(/FAIL +\.env: is readable by other users/);
+    expect(r.stdout).toContain('chmod 600');
   });
 
   it('fails clearly when the file does not exist', () => {
