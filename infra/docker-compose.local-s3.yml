@@ -1,0 +1,28 @@
+# LOCAL ONLY. Never use on the droplet.
+# An unauthenticated throwaway S3 store for developing without a real bucket. Add it AFTER the other files:
+#   docker compose -f docker-compose.yml -f docker-compose.local-https.yml -f docker-compose.local-s3.yml up -d
+# Without this file the data worker uses the real S3_* settings from infra/.env.
+services:
+  s3-local:
+    image: chrislusf/seaweedfs:4.50
+    container_name: aegisops-s3-local
+    restart: unless-stopped
+    command: ["server", "-s3", "-dir=/data", "-volume.max=8", "-master.volumeSizeLimitMB=128"]
+    volumes:
+      - s3-local-data:/data
+    networks:
+      - aegisops-net
+
+  data-worker:
+    environment:
+      S3_ENDPOINT: http://s3-local:8333
+      S3_BUCKET: aegis-backups-local
+      S3_ACCESS_KEY_ID: local
+      S3_SECRET_ACCESS_KEY: local
+      S3_FORCE_PATH_STYLE: "true"
+      S3_ENSURE_BUCKET: "true"
+    depends_on:
+      - s3-local
+
+volumes:
+  s3-local-data:

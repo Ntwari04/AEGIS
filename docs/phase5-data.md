@@ -83,7 +83,9 @@ You need: the object-storage bucket and its credentials, and **`BACKUP_ENCRYPTIO
 4. `docker compose up -d` (migrations first: `docker compose --profile tools run --rm migrate`).
 5. Run a drill once: Backups page → *Run restore drill now*, and confirm it verifies.
 
-Local development uses `docker-compose.local-https.yml`, which adds an unauthenticated throwaway S3 store (`s3-local`). It must never be used on a server.
+Local development with the usual `docker-compose.local-https.yml` uses the real `S3_*` settings from `infra/.env`. To develop without a bucket, add
+`-f docker-compose.local-s3.yml`: it brings an unauthenticated throwaway S3 store (`s3-local`) and points the data worker at it. It must never be used on a server.
+For Cloudflare R2: the endpoint is `https://<account-id>.r2.cloudflarestorage.com` (`.eu.` for an EU-jurisdiction bucket), `S3_REGION=auto`, and the token must be Object Read & Write limited to the bucket.
 
 ## Retention (FR-BACKUP-3)
 

@@ -5,7 +5,8 @@ import { parse } from 'yaml';
 const root = join(__dirname, '../../../..');
 const read = (p: string) => readFileSync(join(root, p), 'utf8');
 const compose = parse(read('infra/docker-compose.yml')) as { services: Record<string, any> };
-const local = parse(read('infra/docker-compose.local-https.yml')) as { services: Record<string, any> };
+const local = parse(read('infra/docker-compose.local-s3.yml')) as { services: Record<string, any> };
+const localHttps = parse(read('infra/docker-compose.local-https.yml')) as { services: Record<string, any> };
 
 describe('backup & database management configuration (Phase 5)', () => {
   const w = compose.services['data-worker'];
@@ -42,6 +43,11 @@ describe('backup & database management configuration (Phase 5)', () => {
     expect(local.services['s3-local'].ports).toBeUndefined();
     expect(local.services['s3-local'].image).toMatch(/:\d[\w.-]*$/); // pinned
     expect(JSON.stringify(compose)).not.toContain('S3_ENSURE_BUCKET');
+  });
+
+  it('the usual local override does NOT swap in the throwaway store: backups use the real bucket unless the s3 file is added', () => {
+    expect(localHttps.services['s3-local']).toBeUndefined();
+    expect(JSON.stringify(localHttps.services['data-worker'] ?? {})).not.toContain('S3_');
   });
 
   it('Postgres receives only the two role passwords it needs to create the data roles', () => {
