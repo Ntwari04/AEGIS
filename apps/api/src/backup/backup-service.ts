@@ -145,6 +145,10 @@ export class BackupService {
 
   /** Streams the stored archive and checks it against the checksum recorded at backup time (catches replacement and corruption). */
   private async verifyChecksum(objectKey: string, expected: string) {
+    // Say what is wrong in plain words: after a change of storage location the records outlive their files.
+    if ((await this.store.size(objectKey)) === null) {
+      throw new Error('the backup file is missing from object storage (the storage location was changed, or the file was deleted)');
+    }
     const hash = createHash('sha256');
     for await (const chunk of await this.store.get(objectKey)) hash.update(chunk as Buffer);
     if (hash.digest('hex') !== expected) throw new Error('archive does not match the checksum recorded at backup time (replaced or corrupted)');

@@ -16,7 +16,7 @@ Defaults match the local stack (`https://localtest.me`, self-signed certificate)
 | 3 | Deploy | a real GHCR image becomes a healthy container, answers `200` on `https://<env domain>/` |
 | 4 | Dashboard | state `Up`, CPU and memory (with the limit) filled in, Metrics and Logs links go to Grafana/Loki, in-app log search loads |
 | 5 | Bad deploy | an image whose health check fails ends `FAILED`/`ROLLED_BACK`, the previous commit stays live and keeps answering |
-| 6 | Backup and restore | provision a database, back it up, restore to a NEW database, integrity line reads `verified: N tables, M rows` |
+| 6 | Backup and restore | provision a database, put a table with 3 rows in it, back it up, restore to a NEW database, integrity line reads exactly `verified: 1 tables, 3 rows` |
 | 7 | Developer isolation | a developer sees no projects, cannot open another project by URL, and `authz.project_denied` is in the audit log |
 | 8 | Auditor | sees the project, databases and servers; is offered no deploy, secret, environment, database, container or cordon control |
 

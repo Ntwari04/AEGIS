@@ -1,6 +1,11 @@
 import { expect, test } from '@playwright/test';
 import * as OTPAuth from 'otpauth';
-import { createUser } from '../helpers/keycloak';
+import { createUser, deleteUser } from '../helpers/keycloak';
+
+const createdUsers: string[] = [];
+test.afterAll(() => {
+  for (const id of createdUsers) deleteUser(id);
+});
 
 /**
  * Phase 2 checkpoint (PRD 14): a real user logs in through Keycloak WITH MFA and creates a project.
@@ -8,6 +13,7 @@ import { createUser } from '../helpers/keycloak';
  */
 test('platform admin: redirected to Keycloak, enrols TOTP, lands authenticated, creates a project', async ({ page }) => {
   const user = await createUser('platform_admin', { temporary: true });
+  createdUsers.push(user.id);
 
   // 1. Unauthenticated visit -> Keycloak
   await page.goto('/projects');

@@ -124,6 +124,10 @@ test.describe.serial('definition of done', () => {
     await page.getByTestId('provision-db').click();
     const db = page.getByTestId('db-e2edb');
     await expect(db.locator('.status')).toHaveText('READY', { timeout: 150_000 });
+    // Real data, so the integrity check proves rows survive: exactly 1 table and 3 rows must come back.
+    const pgName = psql(`select "pgName" from "Database" where "projectId"='${state.projectId}' and name='e2edb'`);
+    expect(pgName).toMatch(/^app_/);
+    psql('create table orders (id int primary key, note text); insert into orders values (1,\'a\'),(2,\'b\'),(3,\'c\');', pgName);
     await db.getByRole('link', { name: 'Backups' }).click();
 
     await page.getByTestId('backup-now').click();
@@ -134,7 +138,7 @@ test.describe.serial('definition of done', () => {
     await backup.getByTestId('restore-new').click();
     const restore = page.getByTestId('restore-history').locator('tbody tr').first();
     await expect(restore.locator('.status')).toHaveText('SUCCESS', { timeout: 200_000 });
-    await expect(restore).toContainText(/verified: \d+ tables, \d+ rows/);
+    await expect(restore).toContainText('verified: 1 tables, 3 rows');
     await expect(restore).toContainText(/restore_/);
   });
 

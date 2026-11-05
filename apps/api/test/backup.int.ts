@@ -209,6 +209,15 @@ describe('tampering and wrong keys', () => {
     expect(await dbExists('restore_tampered')).toBe(false); // not even created
   });
 
+  it('says plainly when the archive is missing from storage (for example after the storage location changed)', async () => {
+    const b = await svc.backup(sys);
+    await store.delete(b.objectKey!);
+    const r = await svc.restoreToNew(b.id, { targetName: 'restore_missing' });
+    expect(r.status).toBe('FAILED');
+    expect(r.error).toMatch(/missing from object storage/);
+    expect(await dbExists('restore_missing')).toBe(false);
+  });
+
   it('detects a valid-but-different archive swapped in (replay of an older backup)', async () => {
     const newer = await svc.backup(sys);
     const older = await svc.backup(sys);

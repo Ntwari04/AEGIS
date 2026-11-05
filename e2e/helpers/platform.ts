@@ -2,11 +2,11 @@ import { execFileSync } from 'node:child_process';
 import type { Page } from '@playwright/test';
 import * as OTPAuth from 'otpauth';
 
-/** Read-only query against the AegisOps database (used only to check what the audit log recorded). */
-export function psql(sql: string): string {
+/** Runs SQL as the superuser: reads the audit log, and seeds rows into the test project's own provisioned database. */
+export function psql(sql: string, database = 'aegisops'): string {
   return execFileSync(
     'docker',
-    ['exec', process.env.E2E_POSTGRES_CONTAINER ?? 'aegisops-postgres', 'psql', '-U', 'postgres', '-d', 'aegisops', '-At', '-F', '|', '-c', sql],
+    ['exec', process.env.E2E_POSTGRES_CONTAINER ?? 'aegisops-postgres', 'psql', '-U', 'postgres', '-d', database, '-At', '-F', '|', '-c', sql],
     { encoding: 'utf8' },
   ).trim();
 }
