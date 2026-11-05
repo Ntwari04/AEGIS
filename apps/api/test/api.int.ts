@@ -86,8 +86,19 @@ async function login(username: string): Promise<string> {
 
 const as = (u: string) => ({ Authorization: `Bearer ${tokens[u]}` });
 const http = () => request(app.getHttpServer());
-const auditActions = async (where: object = {}) =>
-  (await prisma.auditLogEntry.findMany({ where, orderBy: { createdAt: 'asc' } })).map((a) => `${a.action}:${a.result}`);
+// The interceptor writes audit entries without holding up the response, so the newest one may land just after the request returns.
+// Read until two reads in a row agree (bounded), so assertions neither miss a late entry nor wait for one that is not coming.
+const auditActions = async (where: object = {}) => {
+  const read = async () => (await prisma.auditLogEntry.findMany({ where, orderBy: { createdAt: 'asc' } })).map((a) => `${a.action}:${a.result}`);
+  let last = await read();
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    const next = await read();
+    if (next.length === last.length) return next;
+    last = next;
+  }
+  return last;
+};
 
 beforeAll(async () => {
   [pg, kc] = await Promise.all([
