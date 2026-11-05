@@ -13,6 +13,7 @@ import { PrismaClient } from '@prisma/client';
 import { BackupService, targetKey, type Target } from '../src/backup/backup-service';
 import { S3ObjectStore } from '../src/backup/object-store';
 import { PgTools, type PgConn } from '../src/backup/pg-tools';
+import { recover } from '../src/backup/recover';
 
 jest.setTimeout(600_000);
 
@@ -552,5 +553,50 @@ describe('overwrite restore (FR-DB-4): separate, safe, reversible', () => {
     expect(r.status).toBe('FAILED');
     expect(await count(db.pgName)).toBe(before);
     expect((await sql('postgres', "SELECT count(*) FROM pg_database WHERE datname ~ '^restore_ow_'")).trim()).toBe('0');
+  });
+});
+
+describe('disaster recovery without the AegisOps database (recover.ts)', () => {
+  const opts = (database: string, over: Partial<Parameters<typeof recover>[2]> = {}) => ({
+    target: 'aegisops' as const, prefix: 'aegisops/', encryptionKey: key, into: su(database), ...over,
+  });
+  const tableCount = async (database: string) => Object.keys(await tools.countRows(su(database))).length;
+
+  it('rebuilds the newest archive into an EMPTY database using only the bucket and the key: no AegisOps record is read', async () => {
+    await sql('sysdb', `INSERT INTO settings VALUES ('dr-${suffix}','1')`);
+    await svc.backup(sys);
+    await sql('postgres', 'CREATE DATABASE dr_empty');
+
+    const r = await recover(store, tools, opts('dr_empty'));
+    expect(r.objectKey).toMatch(/^aegisops\/system\/aegisops\/.*\.sql\.gz\.enc$/);
+    expect(r.counts).toEqual(await tools.countRows(su('sysdb'))); // same tables, same rows as the live database it was taken from
+    expect((await sql('dr_empty', `SELECT v FROM settings WHERE k='dr-${suffix}'`)).trim()).toBe('1');
+  });
+
+  it('refuses a database that already has tables, and changes nothing in it', async () => {
+    const before = await tools.countRows(su('dr_empty'));
+    await expect(recover(store, tools, opts('dr_empty'))).rejects.toThrow(/already has \d+ table/);
+    expect(await tools.countRows(su('dr_empty'))).toEqual(before);
+  });
+
+  it('with the wrong key it applies nothing', async () => {
+    await sql('postgres', 'CREATE DATABASE dr_wrong_key');
+    await expect(recover(store, tools, opts('dr_wrong_key', { encryptionKey: randomBytes(32) }))).rejects.toThrow();
+    expect(await tableCount('dr_wrong_key')).toBe(0);
+  });
+
+  it('a damaged archive applies nothing (one transaction) and says so', async () => {
+    const b = await svc.backup(sys);
+    const bytes = Buffer.from(await objectBytes(b.objectKey!));
+    bytes[bytes.length - 40] ^= 1;
+    await store.put(b.objectKey!, Readable.from([bytes]));
+    await sql('postgres', 'CREATE DATABASE dr_damaged');
+    await expect(recover(store, tools, opts('dr_damaged', { objectKey: b.objectKey! }))).rejects.toThrow();
+    expect(await tableCount('dr_damaged')).toBe(0);
+  });
+
+  it('names a wrong bucket or prefix plainly, and refuses an object that is not a backup of that target', async () => {
+    await expect(recover(store, tools, opts('dr_wrong_key', { prefix: 'nothing-here/' }))).rejects.toThrow(/no aegisops backups found/);
+    await expect(recover(store, tools, opts('dr_wrong_key', { objectKey: 'aegisops/system/keycloak/x.sql.gz.enc' }))).rejects.toThrow(/not a aegisops backup/);
   });
 });

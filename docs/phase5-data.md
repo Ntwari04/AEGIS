@@ -61,16 +61,26 @@ Drop `<name>_old_<time>` yourself when you are sure (`DROP DATABASE`); AegisOps 
 
 You need: the object-storage bucket and its credentials, and **`BACKUP_ENCRYPTION_KEY`** (kept off the server). Without the key the backups cannot be read by anyone.
 1. Rebuild the stack from the repository (Phase 1 scripts + `docker compose up -d`), with the same `BACKUP_ENCRYPTION_KEY` and storage settings in `infra/.env`.
-2. The AegisOps database is empty and cannot show you the backup list, so restore from storage directly: list `aegisops/system/aegisops/` and
-   `aegisops/system/keycloak/` in the bucket, take the newest `*.sql.gz.enc`, then decrypt and load it with the project's own code:
-   `docker exec -i aegisops-data-worker node -e "…decryptStream…"` is not provided as a one-liner on purpose; use the data worker's restore job once
-   the AegisOps database is back, or a script built on `apps/api/src/backup/crypto-stream.ts` (`decryptStream`, then `gunzip`, then `psql`).
-3. Restore Keycloak first (logins), then AegisOps, then each provisioned database from its newest backup.
+2. The AegisOps database is empty and cannot show you the backup list, so use the recovery tool. It reads only the bucket and the key, never an AegisOps record.
+   Create two EMPTY databases (`keycloak`, `aegisops`) on the new Postgres, then run it from this image (every command reads secrets from the environment, never arguments):
+   ```
+   # S3_* and BACKUP_ENCRYPTION_KEY as in infra/.env; RECOVER_DB_HOST / _PORT / _USER / _PASSWORD point at the empty Postgres
+   node dist/backup/recover-cli.js list
+   node dist/backup/recover-cli.js restore --target keycloak --database keycloak
+   node dist/backup/recover-cli.js restore --target aegisops --database aegisops
+   ```
+   It picks the newest archive (or `--object <key>` for an older one), refuses a database that already has tables, authenticates every chunk, and applies the
+   dump in one transaction: a damaged archive or a wrong key changes nothing. It prints the tables and rows it restored. Run it with the same compose service,
+   e.g. `docker compose run --rm --no-deps -e RECOVER_DB_HOST=... -e RECOVER_DB_USER=... -e RECOVER_DB_PASSWORD=... --entrypoint node data-worker dist/backup/recover-cli.js list`.
+   Connect as the role the service will use (`keycloak` for Keycloak) so objects are owned correctly; the dumps carry no owners.
+3. Restore Keycloak first (logins), then AegisOps, then each provisioned database from its newest backup (once AegisOps is back, from the dashboard).
 4. Redeploy applications from GitHub: their images are in GHCR and their secrets are in the restored AegisOps database (encrypted with `SECRETS_ENCRYPTION_KEY`,
    which must also be restored from your off-server copy).
 
-> This path (an empty AegisOps database) is the one that is **not** automated. Rehearse it once in a throwaway environment before you need it, and write the
-> measured time next to the RTO.
+**Rehearsed 2026-11-05** against the real Cloudflare R2 bucket and a brand-new empty Postgres 16, with nothing from AegisOps but the bucket credentials and the key:
+listing, restoring Keycloak (89 tables, 1,878 rows) and restoring AegisOps (15 tables, 310 rows) took **10 seconds in total**. Row counts matched the manifests recorded at
+backup time exactly. The RTO is 4 hours; this data set is tiny, so read the real figure from your own drill as the data grows. Not rehearsed: bringing the whole stack
+up on a new server (DNS, certificates, Keycloak and the application against the recovered databases). Repeat the rehearsal after big changes and after changing storage.
 
 ## Production setup
 
@@ -130,4 +140,4 @@ server, a foreign container and "stop redis" were all refused and audited. The i
 - Point-in-time recovery (WAL archiving) is not provided; RPO is the backup interval.
 - Backups are encrypted with a symmetric key held on the server (so drills can run unattended). A compromise of the server exposes that key. Public-key encryption
   (server holds only the public key) would remove that, at the cost of unattended drills; see `docs/secrets-review.md`.
-- The "empty AegisOps database" disaster path is documented but not automated (see above).
+- The empty-database disaster path is a tool plus a runbook (see above), rehearsed for the databases only. A full rebuild on a new server has not been rehearsed.

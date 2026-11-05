@@ -47,7 +47,9 @@ Nothing above is in the repository: `.env`, `infra/secrets/` and `*.pem` are git
 ## Keys: custody and rotation
 
 - **Keep an off-server copy of both encryption keys.** Losing `BACKUP_ENCRYPTION_KEY` makes every backup unreadable; losing `SECRETS_ENCRYPTION_KEY` makes every stored
-  environment secret unreadable (re-enter them). A password manager is enough.
+  environment secret unreadable (re-enter them). A password manager is enough. `node infra/scripts/export-keys.mjs` helps: with no arguments it prints a fingerprint of each
+  key (safe to write down), `--reveal` prints the keys in your own terminal only (it refuses to write to a pipe or file), and `--verify NAME` checks a pasted copy against the
+  key in use without printing either. Verify each copy once after saving it.
 - **Rotation is re-encryption:** secrets are bound to their environment and name, so a new key means re-entering each environment secret. For backups, a new key applies to NEW
   archives; keep the old key until the last archive written under it has aged out of retention, or you lose those.
 - **Symmetric vs public-key backups:** with a symmetric key on the server, someone who takes over the server and reaches the bucket can read the backups. With a public key
