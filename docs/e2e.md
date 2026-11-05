@@ -20,11 +20,21 @@ Defaults match the local stack (`https://localtest.me`, self-signed certificate)
 | 7 | Developer isolation | a developer sees no projects, cannot open another project by URL, and `authz.project_denied` is in the audit log |
 | 8 | Auditor | sees the project, databases and servers; is offered no deploy, secret, environment, database, container or cordon control |
 
+Steps 7 to 10 go beyond the eight, covering the screens added after Phase 5:
+
+| # | Step | What the test checks |
+|---|---|---|
+| 7 (cont.) | Membership | the admin adds the developer to the project in the dashboard and the project appears for them; the developer cannot change the team; removing them takes it away again |
+| 8 (cont.) | Auditor | the audit log page is readable and filterable, and offers nothing to change |
+| 9 | Audit log | search by action, every row matches; the CSV export honours the filter; the export is recorded as `audit.export` |
+| 10 | CI key | a key is shown once and only its prefix afterwards; it triggers a deployment of its own project; after revoking it, the same call returns `401` |
+
 ## Things to know
 
 - **Step 3 deploys from the dashboard, not from a GitHub push.** Both create the same deployment, and the webhook path is covered by `apps/api/test/api.int.ts`.
   A signed webhook is deliberately not used: it deploys every project linked to the repository, and the repository belongs to a real project too.
 - Users are created and removed with `kcadm` inside the Keycloak container (the admin API is not public by design). Every run creates one project, one container
-  and one provisioned database that it does not remove: there is no project deletion in the product yet. Remove them by hand if they bother you.
+  and one provisioned database that it does not remove: there is no project deletion in the product yet. `node e2e/scripts/cleanup.mjs` lists them (and only them: slugs
+  starting `e2e-`), `--yes` removes them. It leaves the encrypted archives of those test databases in the bucket (`aegisops/db/`); delete that folder when you like.
 - The test needs Docker access on the machine that runs it (`docker exec` for Keycloak users and a read-only audit-log query).
 - It is not part of CI: it needs the full stack, GHCR images and a public DNS name.

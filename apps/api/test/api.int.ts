@@ -347,6 +347,43 @@ describe('auditor is strictly read-only (e2e step 8)', () => {
     await http().get('/api/v1/audit-log').set(as('it-devops')).expect(403);
   });
 
+  it('searches by result, action prefix, actor (any case) and time range, and rejects bad filters (FR-AUDIT-3)', async () => {
+    const a = as('it-auditor');
+    const denied = await http().get('/api/v1/audit-log?result=DENIED&pageSize=200').set(a).expect(200);
+    expect(denied.body.total).toBeGreaterThan(0);
+    expect(denied.body.items.every((e: { result: string }) => e.result === 'DENIED')).toBe(true);
+
+    const authz = await http().get(`/api/v1/audit-log?action=${encodeURIComponent('authz.*')}&pageSize=200`).set(a).expect(200);
+    expect(authz.body.total).toBeGreaterThan(0);
+    expect(authz.body.items.every((e: { action: string }) => e.action.startsWith('authz.'))).toBe(true);
+
+    const byActor = await http().get('/api/v1/audit-log?actor=IT-DEV&pageSize=200').set(a).expect(200);
+    expect(byActor.body.total).toBeGreaterThan(0);
+    expect(byActor.body.items.every((e: { actorName: string }) => /it-dev/i.test(e.actorName))).toBe(true);
+
+    expect((await http().get('/api/v1/audit-log?from=2999-01-01T00:00:00Z').set(a).expect(200)).body.total).toBe(0);
+    await http().get('/api/v1/audit-log?result=bogus').set(a).expect(400);
+    await http().get('/api/v1/audit-log?from=yesterday').set(a).expect(400);
+  });
+
+  it('exports CSV for auditors and admins only, applies the filters, and records the export itself', async () => {
+    const res = await http().get('/api/v1/audit-log/export?result=DENIED').set(as('it-auditor')).expect(200);
+    expect(res.headers['content-type']).toMatch(/text\/csv/);
+    expect(res.headers['content-disposition']).toMatch(/attachment/);
+    const lines = res.text.trim().split('\r\n');
+    expect(lines[0]).toBe('time,actor,actor_id,action,result,target_type,target_id,source_ip,metadata');
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines.slice(1).every((l) => l.includes(',DENIED,'))).toBe(true);
+
+    await http().get('/api/v1/audit-log/export').set(as('it-admin')).expect(200);
+    await http().get('/api/v1/audit-log/export').set(as('it-dev-a')).expect(403);
+    await http().get('/api/v1/audit-log/export').set(as('it-devops')).expect(403);
+
+    const entry = await prisma.auditLogEntry.findFirstOrThrow({ where: { action: 'audit.export', actorName: 'it-auditor' }, orderBy: { createdAt: 'desc' } });
+    expect(entry).toMatchObject({ result: 'SUCCESS', targetType: 'audit_log' });
+    expect((entry.metadata as { filters: { result: string } }).filters.result).toBe('DENIED');
+  });
+
   it('exposes no way to write the audit log through the API', async () => {
     for (const m of ['post', 'put', 'patch', 'delete'] as const) {
       const res = await (http() as any)[m]('/api/v1/audit-log').set(as('it-admin')).send({});

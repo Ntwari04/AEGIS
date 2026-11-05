@@ -2,7 +2,8 @@ import { notFound, redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
-import { canDeploy, canManageEnvironments, currentRoles } from '@/lib/permissions';
+import { canDeploy, canManageEnvironments, currentRoles, isPrivileged } from '@/lib/permissions';
+import { ApiKeysCard } from './api-keys-card';
 import { DatabasesCard } from './databases-card';
 import type { DeploymentDto, EnvironmentDto, ProjectDto } from '@aegisops/shared-types';
 
@@ -110,6 +111,32 @@ async function rollback(projectId: string, envId: string, deploymentId: string) 
       { method: 'POST' },
       { redirectOn401: false },
     );
+  } catch (e) {
+    if (e instanceof ApiError) back(projectId, e.message);
+    throw e;
+  }
+  back(projectId);
+}
+
+/** FR-PROJ-4: the API allows platform admins and the project's own devops owner; anyone else gets its refusal as a message. */
+async function addMember(projectId: string, formData: FormData) {
+  'use server';
+  try {
+    await api(`/projects/${encodeURIComponent(projectId)}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ username: text(formData, 'username'), role: text(formData, 'role') === 'OWNER' ? 'OWNER' : 'MEMBER' }),
+    }, { redirectOn401: false });
+  } catch (e) {
+    if (e instanceof ApiError) back(projectId, e.message);
+    throw e;
+  }
+  back(projectId);
+}
+
+async function removeMember(projectId: string, userId: string) {
+  'use server';
+  try {
+    await api(`/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`, { method: 'DELETE' }, { redirectOn401: false });
   } catch (e) {
     if (e instanceof ApiError) back(projectId, e.message);
     throw e;
@@ -304,16 +331,33 @@ export default async function ProjectDetail({
       </form>
       )}
 
-      <div className="card">
-        <strong>Members</strong>
-        <table>
+      <div className="card" data-testid="members-card">
+        <strong>Members</strong>{' '}
+        <span className="muted">(who can see this project and deploy to it; a person must have signed in once before they can be added)</span>
+        <table data-testid="members-table">
           <tbody>
             {p.members.map((m) => (
-              <tr key={m.userId}><td>{m.user.username}</td><td className="muted">{m.role}</td></tr>
+              <tr key={m.userId} data-testid={`member-${m.user.username}`}>
+                <td>{m.user.username}</td>
+                <td className="muted">{m.role}</td>
+                <td>{isPrivileged(roles) && <form action={removeMember.bind(null, id, m.userId)}><button className="link" data-testid={`remove-${m.user.username}`}>Remove</button></form>}</td>
+              </tr>
             ))}
           </tbody>
         </table>
+        {isPrivileged(roles) && (
+          <form action={addMember.bind(null, id)} className="inline" style={{ marginTop: 12 }}>
+            <div><label htmlFor="member-username">Username</label><input id="member-username" name="username" required maxLength={100} autoComplete="off" /></div>
+            <div>
+              <label htmlFor="member-role">Role in this project</label>
+              <select id="member-role" name="role" defaultValue="MEMBER"><option value="MEMBER">Member</option><option value="OWNER">Owner (can manage members)</option></select>
+            </div>
+            <button data-testid="add-member">Add member</button>
+          </form>
+        )}
       </div>
+
+      {!roles.includes('auditor') && <ApiKeysCard projectId={id} />}
     </>
   );
 }

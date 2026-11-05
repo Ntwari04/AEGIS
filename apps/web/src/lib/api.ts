@@ -31,6 +31,11 @@ async function accessToken(): Promise<string> {
  * Redirecting to /login would throw away the user's input; the action reports it and the user retries.
  * (Never refresh here too: Keycloak rotates refresh tokens, so a second use of the old one kills the session.)
  */
+/** The raw response, for downloads (CSV) that are not JSON. Same token handling as api(); the caller checks `ok`. */
+export async function apiRaw(path: string): Promise<Response> {
+  return fetch(`${API_URL}${path}`, { cache: 'no-store', headers: { Authorization: `Bearer ${await accessToken()}` } });
+}
+
 export async function api<T>(path: string, init: RequestInit = {}, opts: { redirectOn401?: boolean } = {}): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
     ...init,

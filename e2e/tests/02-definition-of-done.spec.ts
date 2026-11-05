@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { expect, test, type Browser, type Page } from '@playwright/test';
 import { createUser, deleteUser } from '../helpers/keycloak';
 import { psql, signIn } from '../helpers/platform';
@@ -164,6 +165,22 @@ test.describe.serial('definition of done', () => {
       await expect
         .poll(() => psql(`select count(*) from "AuditLogEntry" where action='authz.project_denied' and result='DENIED' and "targetId"='${state.projectId}' and "actorName" like '%${who}%'`), { timeout: 30_000 })
         .not.toBe('0');
+
+      // Membership is what grants access (FR-IAM-4 / FR-PROJ-4): the admin adds the developer in the dashboard, and takes them out again.
+      await page.goto(`/projects/${state.projectId}`);
+      await page.locator('#member-username').fill(dev.username);
+      await page.getByTestId('add-member').click();
+      await expect(page.getByTestId(`member-${dev.username}`)).toBeVisible();
+      await devPage.goto('/projects');
+      await expect(devPage.getByTestId(`project-${slug}`)).toBeVisible();
+      await devPage.goto(`/projects/${state.projectId}`);
+      await expect(devPage.getByTestId('project-name')).toHaveText(`E2E ${tag}`);
+      await expect(devPage.getByTestId('add-member')).toHaveCount(0); // a developer can read the team, not change it
+
+      await page.getByTestId(`remove-${dev.username}`).click();
+      await expect(page.getByTestId(`member-${dev.username}`)).toHaveCount(0);
+      await devPage.goto(`/projects/${state.projectId}`);
+      await expect(devPage.getByTestId('project-name')).toHaveCount(0);
     } finally {
       await devPage.context().close();
     }
@@ -182,7 +199,7 @@ test.describe.serial('definition of done', () => {
       await audPage.goto(`/projects/${state.projectId}`);
       await expect(audPage.getByTestId('env-staging')).toContainText(domain);
       await expect(audPage.getByTestId('history-staging')).toBeVisible();
-      for (const id of ['deploy-staging', 'set-secret-staging', 'add-environment', 'provision-db', 'restart-staging', 'stop-staging']) {
+      for (const id of ['deploy-staging', 'set-secret-staging', 'add-environment', 'provision-db', 'restart-staging', 'stop-staging', 'add-member', 'api-keys-card']) {
         await expect(audPage.getByTestId(id), `${id} must not be offered to an auditor`).toHaveCount(0);
       }
       await expect(audPage.getByTestId('db-e2edb')).toBeVisible();
@@ -194,8 +211,61 @@ test.describe.serial('definition of done', () => {
       }
       await audPage.goto('/backups');
       await expect(audPage.getByTestId('drill-now')).toHaveCount(0);
+
+      // The audit log is the auditor's tool: searchable and exportable, with nothing to edit.
+      await audPage.goto('/audit');
+      await expect(audPage.getByTestId('audit-table')).toBeVisible();
+      await expect(audPage.getByTestId('audit-export')).toBeVisible();
+      await audPage.locator('#f-result').selectOption('DENIED');
+      await audPage.getByTestId('audit-search').click();
+      await expect(audPage.getByTestId('audit-row').first()).toContainText('DENIED');
+      for (const row of await audPage.getByTestId('audit-row').all()) await expect(row).toContainText('DENIED');
     } finally {
       await audPage.context().close();
     }
+  });
+
+  test('9. the audit log can be searched and exported, and the export is itself recorded', async () => {
+    await page.goto('/audit');
+    await expect(page.getByTestId('audit-table')).toBeVisible();
+    await page.locator('#f-action').fill('project.create');
+    await page.getByTestId('audit-search').click();
+    await expect(page.getByTestId('audit-row').first()).toContainText('project.create');
+    for (const row of await page.getByTestId('audit-row').all()) await expect(row).toContainText('project.create');
+
+    const [download] = await Promise.all([page.waitForEvent('download'), page.getByTestId('audit-export').click()]);
+    const csv = readFileSync((await download.path())!, 'utf8');
+    expect(csv.split('\r\n')[0]).toBe('time,actor,actor_id,action,result,target_type,target_id,source_ip,metadata');
+    expect(csv).toContain('project.create');
+    expect(csv).not.toContain('authz.project_denied'); // the filter applies to the export, not just the page
+
+    const who = state.admin!.username.split('-').pop()!;
+    await expect
+      .poll(() => psql(`select count(*) from "AuditLogEntry" where action='audit.export' and result='SUCCESS' and "actorName" like '%${who}%'`), { timeout: 30_000 })
+      .not.toBe('0');
+  });
+
+  test('10. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
+    test.setTimeout(150_000);
+    await page.goto(`/projects/${state.projectId}`);
+    await page.locator('#key-name').fill('e2e-ci');
+    await page.getByTestId('create-api-key').click();
+    const shown = page.getByTestId('new-api-key');
+    await expect(shown).toBeVisible();
+    const key = (await shown.innerText()).trim();
+    expect(key).toMatch(/^aegis_[A-Za-z0-9_-]{20,}$/);
+
+    // After a reload the key is gone: only its first characters are listed.
+    await page.goto(`/projects/${state.projectId}`);
+    await expect(page.getByTestId('new-api-key')).toHaveCount(0);
+    await expect(page.getByTestId('api-key-e2e-ci')).toContainText(key.slice(0, 12));
+    await expect(page.getByTestId('api-key-e2e-ci')).not.toContainText(key);
+
+    const call = () => page.request.post('/api/v1/ci/deployments', { headers: { 'X-API-Key': key }, data: { environment: 'staging', commitSha: GOOD_SHA } });
+    expect((await call()).status()).toBe(201);
+
+    await page.getByTestId('revoke-e2e-ci').click();
+    await expect(page.getByTestId('api-key-e2e-ci')).toContainText('revoked');
+    expect((await call()).status()).toBe(401);
   });
 });

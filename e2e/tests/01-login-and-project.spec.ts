@@ -54,7 +54,7 @@ test('platform admin: redirected to Keycloak, enrols TOTP, lands authenticated, 
   await page.locator('#slug').fill(slug);
   await page.locator('#githubRepo').fill(process.env.E2E_GITHUB_REPO ?? 'Ntwari04/AEGIS');
   await page.getByTestId('create-project').click();
-  await expect(page.getByTestId('project-name')).toHaveText('E2E Project');
+  await expect(page.getByTestId('project-name')).toHaveText('E2E Project', { timeout: 30_000 }); // the first page after a restart is slow
 
   // 6b. Add an environment on the project page; a platform admin sees deploy and secret controls (FR-PROJ-3)
   await page.locator('#env-name').fill('staging');
