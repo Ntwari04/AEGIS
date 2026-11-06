@@ -210,12 +210,31 @@ tests:
     interval: 30s
     input_series:
       - {series: 'keycloak_user_events_total{event="login",error="user_not_found",realm="aegisops"}', values: '_x6 7x20'}
+      - {series: 'up{job="keycloak",instance="keycloak:9000"}', values: '1x26'}    # Keycloak was being scraped the whole time
     alert_rule_test:
       - eval_time: 5m
         alertname: RepeatedFailedLogins
         exp_alerts:
           - exp_labels: { severity: warning }
             exp_annotations: { summary: "7 failed logins in the last 5 minutes" }
+
+  # Regression: the machine (or Docker) sleeps, Prometheus has no samples for a while, then both series come back. The running
+  # total of old failures (12) must not be mistaken for a burst. This fired four times in one morning before the rule was fixed.
+  - name: RepeatedFailedLogins stays quiet when a scrape gap makes an old running total look new
+    interval: 30s
+    input_series:
+      - {series: 'keycloak_user_events_total{event="login",error="invalid_user_credentials",realm="aegisops"}', values: '12x10 _x20 12x20'}
+      - {series: 'up{job="keycloak",instance="keycloak:9000"}', values: '1x10 _x20 1x20'}
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: RepeatedFailedLogins
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: RepeatedFailedLogins
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: RepeatedFailedLogins
+        exp_alerts: []
 
   - name: RepeatedFailedLogins ignores successful logins
     interval: 30s

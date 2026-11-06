@@ -91,10 +91,17 @@ groups:
       - alert: RepeatedFailedLogins
         # The second branch covers a counter that first appears mid-burst: Keycloak creates it at the first failure, so
         # increase() has no earlier sample and would miss exactly the first burst. A new counter is treated as starting at 0.
+        # It must NOT fire just because Prometheus has no sample from 5 minutes ago: after the machine (or Docker) sleeps, or a
+        # scrape gap, the running total of ALL past failures would look like a fresh burst. So it requires that Keycloak itself
+        # WAS being scraped 5 minutes ago (`up` existed) while the counter was not there: then the counter really is new.
         expr: |
           sum(increase(keycloak_user_events_total{event="login", error!=""}[5m])) > 5
             or
-          (sum(keycloak_user_events_total{event="login", error!=""}) - (sum(keycloak_user_events_total{event="login", error!=""} offset 5m) or vector(0))) > 5
+          (
+            sum(keycloak_user_events_total{event="login", error!=""}) > 5
+              and on() absent(keycloak_user_events_total{event="login", error!=""} offset 5m)
+              and on() (count(up{job="keycloak"} offset 5m) > 0)
+          )
         labels: { severity: warning }
         annotations:
           summary: "{{ $value | printf \"%.0f\" }} failed logins in the last 5 minutes"

@@ -103,9 +103,14 @@ Findings fixed on the way: cAdvisor could not track containers on Docker Desktop
 replaced by the first-party exporter; a PromQL `unless`/`or` precedence bug made `PlatformContainerDown` fire for healthy containers (now guarded by promtool tests);
 Keycloak reports failed logins as `event="login"` with an `error` label, not `login_error`; a new counter's first burst is invisible to `increase()` (handled).
 
+**False alarm found 2026-11-06, fixed.** The "new counter" branch of `RepeatedFailedLogins` treated "no sample 5 minutes ago" as "the counter is new", so after the machine
+(or Docker) slept, the running total of old failures (12) looked like a fresh burst and the alert fired four times in a morning with no failed login at all. The branch now also
+requires that Keycloak was being scraped 5 minutes ago (`up` existed), and a promtool test reproduces the sleep gap (it fails against the old rule). On a laptop, expect gaps in all
+metrics while it sleeps; on a server this does not happen.
+
 ## Known gaps
 
-- Alertmanager delivery to Slack / email is configured but **not exercised** until a real webhook or SMTP account is set.
+- Alertmanager delivery to Slack is connected and exercised (2026-11-05); email is not configured.
 - Login success/failure events are counted and alerted, but not yet shown in the AegisOps audit view (FR-IAM-6); Keycloak's own logs are searchable in Loki.
 - Per-project log access for developers inside AegisOps (Loki is Grafana-only for operators and auditors).
 - The Grafana "Alertmanager" datasource health test reports an error on this Grafana version; the alert list panel works.
