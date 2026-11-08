@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import Link from 'next/link';
-import { auth, signOut } from '@/auth';
+import { auth } from '@/auth';
+import { signOutEverywhere } from './sign-out';
 import './globals.css';
 
 export const metadata = { title: 'AegisOps' };
@@ -24,7 +25,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
               <div className="who">
                 <span data-testid="whoami">{session.user.name ?? session.user.email}</span>
                 <span className="role">{roles.join(', ') || 'no role'}</span>
-                <form action={async () => { 'use server'; await signOut({ redirectTo: '/login' }); }}>
+                <form action={signOutEverywhere}>
                   <button className="link">Sign out</button>
                 </form>
               </div>

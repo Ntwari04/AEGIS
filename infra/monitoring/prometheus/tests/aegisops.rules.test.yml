@@ -380,3 +380,26 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, target: "db:slow" }
             exp_annotations: { summary: "Restoring db:slow took 5h 0m 0s, longer than the RTO" }
+
+  - name: AuthEventsNotCopied fires when the audit log's copy of Keycloak events goes stale
+    interval: 1m
+    input_series:
+      - {series: 'aegisops_auth_events_last_ingest_timestamp_seconds', values: '60x30'}   # last copied at t=1m, never again
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: AuthEventsNotCopied
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AuthEventsNotCopied
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "Keycloak events have not been copied into the audit log for 19m 0s" }
+
+  - name: AuthEventsNotCopied stays quiet while events keep being copied
+    interval: 1m
+    input_series:
+      - {series: 'aegisops_auth_events_last_ingest_timestamp_seconds', values: '0+60x30'}  # advances with the clock
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AuthEventsNotCopied
+        exp_alerts: []

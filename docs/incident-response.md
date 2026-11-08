@@ -48,7 +48,10 @@ Never `docker compose down -v`: that deletes the database volumes.
    /opt/keycloak/bin/kcadm.sh update users/<id> -r aegisops -s enabled=false
    /opt/keycloak/bin/kcadm.sh create users/<id>/logout -r aegisops -s realm=aegisops
    ```
-2. An access token already issued stays valid for up to 15 minutes (PRD 16, FR-IAM-7: immediate revocation is still open). The API refuses them at the next refresh.
+2. Keycloak reports the change in its log, and the API then refuses every token issued to that person before it: typically **within a minute** (a 30-second poll plus log
+   shipping), not the 15 minutes a token would otherwise last. Check it worked: Audit log, filter *Who* by their username, action `auth.token_revoked`. If you cannot wait, stop
+   `web` and `api` (section 2) or restart `api`, which also catches up on events it missed. The alert `AuthEventsNotCopied` means this path is not working: until it is fixed,
+   assume a token lives its full 15 minutes.
 3. **Revoke their API keys.** A key keeps working after its owner leaves: platform admin sees all keys under each project's page.
 4. Remove them from projects (Members → Remove).
 5. If they could read environment secrets or a database connection string, treat those as exposed and rotate them (section 4).

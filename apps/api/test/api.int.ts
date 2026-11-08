@@ -26,6 +26,7 @@ const USERS = [
   { username: 'it-dev-a', role: 'developer' },
   { username: 'it-dev-b', role: 'developer' },
   { username: 'it-auditor', role: 'auditor' },
+  { username: 'it-session', role: 'developer' }, // only the session-revocation tests touch this one
 ];
 
 let pg: StartedPostgreSqlContainer;
@@ -409,6 +410,80 @@ describe('audit log is append-only in the database (FR-AUDIT-2)', () => {
     await expect(prisma.auditLogEntry.deleteMany()).rejects.toThrow(/append-only/);
     await expect(prisma.$executeRawUnsafe('TRUNCATE "AuditLogEntry"')).rejects.toThrow(/append-only/);
     expect(await prisma.auditLogEntry.findUnique({ where: { id: row.id } })).toMatchObject({ action: row.action });
+  });
+});
+
+describe('session revocation and Keycloak events in the audit log (FR-IAM-6, FR-IAM-7)', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  let svc: { ingest: (lines: { ts: string; line: string }[]) => Promise<{ read: number; inserted: number; revoked: number }> };
+  let subject: string;
+  let userId: string;
+  const nowNs = (offsetMs = 0) => String((BigInt(Date.now()) + BigInt(offsetMs)) * 1_000_000n);
+  const line = (body: string, realm = 'aegisops') => `2026-11-08 12:00:00,000 INFO  [org.keycloak.events] (executor-thread-1) ${body.replace('__REALM__', realm)}`;
+  const loginError = () => line(`type="LOGIN_ERROR", realmId="r1", realmName="__REALM__", clientId="aegisops-web", userId="${subject}", ipAddress="10.1.2.3", error="invalid_user_credentials", username="it-session"`);
+  const roleAdded = () => line(`operationType="CREATE", realmId="m1", realmName="master", clientId="c1", userId="00000000-0000-4000-8000-000000000001", ipAddress="127.0.0.1", resourceType="REALM_ROLE_MAPPING", resourcePath="users/${subject}/role-mappings/realm"`);
+
+  beforeAll(async () => {
+    const { AuthEventsService } = await import('../src/auth/auth-events.service');
+    svc = app.get(AuthEventsService);
+    const u = await prisma.user.findFirstOrThrow({ where: { username: 'it-session' } });
+    subject = u.keycloakId;
+    userId = u.id;
+  });
+
+  it('signing out refuses the tokens already issued, at once, and a new sign-in works', async () => {
+    await http().get('/api/v1/me').set(as('it-session')).expect(200);
+    await http().post('/api/v1/me/revoke').set(as('it-session')).expect(204);
+
+    const res = await http().get('/api/v1/me').set(as('it-session')).expect(401);
+    expect(res.body.error.message).toBe('Session ended: sign in again');
+    expect(await auditActions({ actorId: userId, action: 'auth.token_revoked' })).toContain('auth.token_revoked:DENIED');
+    expect(await auditActions({ action: 'auth.session_revoked' })).toContain('auth.session_revoked:SUCCESS');
+
+    await sleep(1100); // token issue times have one-second resolution
+    tokens['it-session'] = await login('it-session');
+    await http().get('/api/v1/me').set(as('it-session')).expect(200);
+  });
+
+  it('a role change reported by Keycloak refuses the tokens issued before it, and not the ones issued after', async () => {
+    const before = tokens['it-session'];
+    await sleep(1100);
+    const r = await svc.ingest([{ ts: nowNs(), line: roleAdded() }]);
+    expect(r).toMatchObject({ inserted: 1, revoked: 1 });
+
+    await http().get('/api/v1/me').set({ Authorization: `Bearer ${before}` }).expect(401);
+    await sleep(1100);
+    tokens['it-session'] = await login('it-session');
+    await http().get('/api/v1/me').set(as('it-session')).expect(200);
+  });
+
+  it('copies events into the audit log once, maps the person to their AegisOps user, and is searchable by an auditor', async () => {
+    const lines = [{ ts: nowNs(5), line: loginError() }];
+    expect(await svc.ingest(lines)).toMatchObject({ inserted: 1, revoked: 0 });
+    expect(await svc.ingest(lines)).toMatchObject({ inserted: 0, revoked: 0 }); // reading the same line again changes nothing
+
+    const rows = await prisma.auditLogEntry.findMany({ where: { action: 'auth.login_error', actorId: userId } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ result: 'DENIED', actorName: 'it-session', sourceIp: '10.1.2.3', targetType: 'user' });
+    expect(rows[0].sourceKey).toMatch(/^kc:/);
+
+    const found = await http().get(`/api/v1/audit-log?action=${encodeURIComponent('auth.*')}&pageSize=200`).set(as('it-auditor')).expect(200);
+    const actions = found.body.items.map((e: { action: string }) => e.action);
+    expect(actions).toEqual(expect.arrayContaining(['auth.login_error', 'auth.admin.realm_role_mapping.create']));
+  });
+
+  it('never moves a person\'s cut-off backwards, and ignores events of a realm that is not ours', async () => {
+    const cutoff = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).tokensValidAfter!;
+    expect(cutoff).toBeTruthy();
+    await svc.ingest([{ ts: String((BigInt(cutoff.getTime()) - 60_000n) * 1_000_000n), line: roleAdded().replace('REALM_ROLE_MAPPING', 'GROUP_MEMBERSHIP') }]);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: userId } })).tokensValidAfter).toEqual(cutoff);
+
+    const foreign = await svc.ingest([{ ts: nowNs(9), line: loginError().replace('realmName="aegisops"', 'realmName="other"') }]);
+    expect(foreign.inserted).toBe(0);
+  });
+
+  it('revoking is open to every signed-in role and needs a token', async () => {
+    await http().post('/api/v1/me/revoke').expect(401);
   });
 });
 

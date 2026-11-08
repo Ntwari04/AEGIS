@@ -1,6 +1,7 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 import { PrismaService } from '../prisma/prisma.service';
+import { authEventsState } from '../auth/auth-events.state';
 import { DEPLOYMENT_QUEUE, type DeploymentQueue } from '../deployments/deployments.controller';
 
 interface BackupSnapshot {
@@ -76,6 +77,12 @@ export class MetricsService {
     });
     gauge('aegisops_restore_drill_duration_seconds', 'How long the last successful restore drill took: the measured restore time', ['target'], (g, d) => {
       for (const [t, r] of d.lastDrillSuccess) if (r.durationMs !== null) g.set({ target: t }, r.durationMs / 1000);
+    });
+    // FR-IAM-6: how fresh the audit log's copy of Keycloak's events is. Absent when the copying is switched off (tests, no Loki).
+    new Gauge({
+      name: 'aegisops_auth_events_last_ingest_timestamp_seconds', registers: [this.registry],
+      help: 'Unix time Keycloak events were last copied into the audit log successfully',
+      collect() { if (authEventsState.enabled) this.set(authEventsState.lastOkSeconds); },
     });
     new Gauge({
       name: 'aegisops_restore_rto_seconds', help: 'The restore time objective a drill is held to (PRD 7)', registers: [this.registry],

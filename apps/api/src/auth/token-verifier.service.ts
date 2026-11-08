@@ -5,6 +5,8 @@ import { APP_ENV, AppEnv } from '../config/env';
 
 export interface VerifiedToken {
   sub: string;
+  /** When Keycloak issued the token (seconds). Compared with the person's revocation time (FR-IAM-7). */
+  iat?: number;
   username: string;
   email?: string;
   roles: Role[];
@@ -35,6 +37,7 @@ export class TokenVerifier {
     const roles = claimed.filter((r): r is Role => (ROLES as readonly unknown[]).includes(r));
     return {
       sub: p.sub,
+      iat: typeof p.iat === 'number' ? p.iat : undefined,
       username: String(p['preferred_username'] ?? p.sub),
       email: typeof p['email'] === 'string' ? p['email'] : undefined,
       roles,

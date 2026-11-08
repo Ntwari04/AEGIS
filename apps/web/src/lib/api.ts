@@ -6,6 +6,9 @@ import { getToken } from 'next-auth/jwt';
 const API_URL = process.env.API_URL!;
 
 export const SESSION_RENEWED = 'Your session was just renewed. Please submit again.';
+/** What the API says when this person signed out elsewhere, or their access was changed (FR-IAM-7). Must match the API's text. */
+export const API_SESSION_ENDED = 'Session ended: sign in again';
+export const SESSION_ENDED = 'Your access changed or you signed out elsewhere. Reload the page to sign in again.';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -46,9 +49,13 @@ export async function api<T>(path: string, init: RequestInit = {}, opts: { redir
       Authorization: `Bearer ${await accessToken()}`,
     },
   });
-  if (res.status === 401 && opts.redirectOn401 !== false) redirect('/login');
   if (res.status === 204) return undefined as T;
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(res.status, res.status === 401 ? SESSION_RENEWED : (body?.error?.message ?? res.statusText));
+  const ended = res.status === 401 && body?.error?.message === API_SESSION_ENDED;
+  // A refused token is not an expired one: the cookie must be cleared and the person sent through a fresh sign-in (which is
+  // silent while their Keycloak session lives, so a role change takes effect without typing a password).
+  if (ended && opts.redirectOn401 !== false) redirect('/session-ended');
+  if (res.status === 401 && opts.redirectOn401 !== false) redirect('/login');
+  if (!res.ok) throw new ApiError(res.status, ended ? SESSION_ENDED : res.status === 401 ? SESSION_RENEWED : (body?.error?.message ?? res.statusText));
   return body as T;
 }

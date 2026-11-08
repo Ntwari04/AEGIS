@@ -90,6 +90,9 @@ services:
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"               # management port 9000, not published; scraped by Prometheus
       KC_EVENT_METRICS_USER_ENABLED: "true"    # counts login_error events for the failed-logins alert
+      # Keycloak logs successful events (sign-ins, sign-outs, admin changes) at DEBUG unless told otherwise; the API copies them from
+      # the log (via Loki) into the audit log, so they must be written at INFO (FR-IAM-6 / FR-IAM-7).
+      KC_SPI_EVENTS_LISTENER__JBOSS_LOGGING__SUCCESS_LEVEL: info
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?set in infra/.env}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?set in infra/.env}
       # Substituted into realm-aegisops.json at import time (never committed):

@@ -41,6 +41,12 @@ export async function createUser(role: string, opts: { temporary: boolean }) {
   return { id, username, password };
 }
 
+/** Gives an existing user another realm role, as an administrator changing someone's access would. */
+export function addRole(username: string, role: string) {
+  login();
+  sh(`${KCADM} add-roles -r ${REALM} --config ${CFG} --uusername ${username} --rolename ${role}`);
+}
+
 /** Removes the user again so repeated runs leave the realm as they found it. */
 export function deleteUser(id: string) {
   try {

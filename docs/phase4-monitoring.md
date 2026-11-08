@@ -45,6 +45,7 @@ Rules live in `infra/monitoring/prometheus/rules/aegisops.rules.yml`; thresholds
 | `HostMemoryHigh` / `DiskUsageHigh` | host memory > 90%, a filesystem > 85% |
 | `CertificateExpiringSoon` / `TlsProbeFailing` | the TLS certificate expires within 14 days; the probe cannot connect |
 | `RepeatedFailedLogins` | more than 5 failed Keycloak logins in 5 minutes |
+| `AuthEventsNotCopied` | the API has not copied Keycloak's events into the audit log for 10 minutes (sign-ins would go missing and role changes would not take effect early) |
 | `DeploymentFailed` / `DeployQueueBacklog` / `ApiHighErrorRate` | a deployment failed or rolled back; deployments queued > 10 min; more than 5% 5xx |
 | `ScrapeTargetDown` | a monitoring target is unreachable |
 | `BackupFailed` / `BackupStale` | **Phase 5** publishes the backup metrics these read; until then they never fire |

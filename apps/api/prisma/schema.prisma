@@ -63,6 +63,9 @@ model User {
   email      String?
   createdAt  DateTime @default(now())
   lastSeenAt DateTime @default(now())
+  /// FR-IAM-7: any access token issued at or before this moment is refused, however long it has left. Set on logout,
+  /// and when Keycloak reports a role, group or account change for this person.
+  tokensValidAfter DateTime?
 
   memberships ProjectMember[]
   apiKeys     ApiKey[]
@@ -300,6 +303,8 @@ model AuditLogEntry {
   sourceIp   String?
   /// Never contains secrets or request bodies; see AuditService.sanitize.
   metadata   Json?
+  /// Set only for entries copied in from another system (Keycloak events), so re-reading the same event never writes it twice.
+  sourceKey  String?     @unique
 
   @@index([createdAt])
   @@index([actorId])

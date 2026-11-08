@@ -76,7 +76,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return session;
     },
     authorized({ auth: session, request }) {
-      const open = ['/login', '/api/auth'].some((p) => request.nextUrl.pathname.startsWith(p));
+      const open = ['/login', '/api/auth', '/session-ended'].some((p) => request.nextUrl.pathname.startsWith(p));
       if (open) return true;
       return !!session?.user && (session as any).error !== 'RefreshTokenError';
     },

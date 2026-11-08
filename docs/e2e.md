@@ -20,14 +20,16 @@ Defaults match the local stack (`https://localtest.me`, self-signed certificate)
 | 7 | Developer isolation | a developer sees no projects, cannot open another project by URL, and `authz.project_denied` is in the audit log |
 | 8 | Auditor | sees the project, databases and servers; is offered no deploy, secret, environment, database, container or cordon control |
 
-Steps 7 to 10 go beyond the eight, covering the screens added after Phase 5:
+Steps 7 to 12 go beyond the eight, covering the screens added after Phase 5:
 
 | # | Step | What the test checks |
 |---|---|---|
 | 7 (cont.) | Membership | the admin adds the developer to the project in the dashboard and the project appears for them; the developer cannot change the team; removing them takes it away again |
 | 8 (cont.) | Auditor | the audit log page is readable and filterable, and offers nothing to change |
 | 9 | Audit log | search by action, every row matches; the CSV export honours the filter; the export is recorded as `audit.export` |
-| 10 | CI key | a key is shown once and only its prefix afterwards; it triggers a deployment of its own project; after revoking it, the same call returns `401` |
+| 10 | Sign-out | signing out ends the Keycloak session too: signing in again shows the login form, not a silent sign-in |
+| 11 | Sign-ins and role changes | a sign-in appears in the audit log (Keycloak, Promtail, Loki, API); an administrator adds a role and the person's navigation changes within about a minute; the change and the refused old token are in the audit log |
+| 12 | CI key | a key is shown once and only its prefix afterwards; it triggers a deployment of its own project; after revoking it, the same call returns `401` |
 
 ## Things to know
 

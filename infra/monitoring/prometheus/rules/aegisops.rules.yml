@@ -106,6 +106,15 @@ groups:
         annotations:
           summary: "{{ $value | printf \"%.0f\" }} failed logins in the last 5 minutes"
 
+      # FR-IAM-6 / FR-IAM-7: sign-ins, sign-outs and role changes reach the audit log, and revoke tokens, only while the API keeps copying
+      # Keycloak's events. If that stops, say so: otherwise the audit log silently goes stale and a role change stops taking effect early.
+      - alert: AuthEventsNotCopied
+        expr: time() - aegisops_auth_events_last_ingest_timestamp_seconds > 600
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Keycloak events have not been copied into the audit log for {{ $value | humanizeDuration }}"
+
   - name: platform
     rules:
       - alert: ScrapeTargetDown

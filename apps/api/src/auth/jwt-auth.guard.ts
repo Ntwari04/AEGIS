@@ -4,6 +4,10 @@ import { IS_PUBLIC } from './decorators';
 import { TokenVerifier } from './token-verifier.service';
 import { UsersService } from '../users/users.service';
 import { AuditService } from '../audit/audit.service';
+import { isRevoked } from './revocation';
+
+/** The dashboard recognises this exact message and sends the person through a fresh sign-in. */
+export const SESSION_ENDED = 'Session ended: sign in again';
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
@@ -37,6 +41,11 @@ export class JwtAuthGuard implements CanActivate {
     }
 
     const user = await this.users.upsertFromToken(verified);
+    // FR-IAM-7: a token issued before this person signed out, or before their access was changed, is refused however long it has left.
+    if (isRevoked(user.tokensValidAfter, verified.iat)) {
+      await this.audit.record({ actorId: user.id, actorName: verified.username, action: 'auth.token_revoked', targetType: 'user', targetId: user.id, result: 'DENIED', sourceIp: req.ip });
+      throw new UnauthorizedException(SESSION_ENDED);
+    }
     req.user = {
       id: user.id,
       keycloakId: verified.sub,

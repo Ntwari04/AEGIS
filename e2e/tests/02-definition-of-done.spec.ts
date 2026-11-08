@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { expect, test, type Browser, type Page } from '@playwright/test';
-import { createUser, deleteUser } from '../helpers/keycloak';
+import { addRole, createUser, deleteUser } from '../helpers/keycloak';
 import { psql, signIn } from '../helpers/platform';
 
 /**
@@ -245,7 +245,63 @@ test.describe.serial('definition of done', () => {
       .not.toBe('0');
   });
 
-  test('10. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
+  test('10. signing out ends the Keycloak session too: signing back in asks for a password again', async ({ browser }) => {
+    test.setTimeout(150_000);
+    const person = await createUser('developer', { temporary: true });
+    created.push(person.id);
+    const p = await freshPage(browser);
+    try {
+      await signIn(p, person);
+      await p.getByRole('button', { name: 'Sign out' }).click();
+      await p.locator('#kc-logout').click(); // Keycloak asks to confirm when it is not given the ID token
+      await p.waitForURL(/\/login/);
+
+      await p.goto('/projects');
+      await p.waitForURL(/\/login/);
+      await p.getByTestId('signin').click();
+      await p.waitForURL(/\/realms\/aegisops\//);
+      await expect(p.locator('#username')).toBeVisible(); // the login form, not a silent sign-in
+    } finally {
+      await p.context().close();
+    }
+  });
+
+  test('11. sign-ins and role changes reach the audit log, and a role change takes effect within about a minute', async ({ browser }) => {
+    test.setTimeout(420_000);
+    const person = await createUser('developer', { temporary: true });
+    created.push(person.id);
+    const p = await freshPage(browser);
+    try {
+      await signIn(p, person);
+      await expect(p.getByRole('link', { name: 'Audit log' })).toHaveCount(0);
+
+      // FR-IAM-6: Keycloak's sign-in event is copied into the audit log (Keycloak -> Promtail -> Loki -> API).
+      const seen = async (query: string) => {
+        await page.goto(`/audit?${query}`);
+        return page.getByTestId('audit-row').count();
+      };
+      await expect.poll(() => seen(`action=auth.login&actor=${person.username}`), { timeout: 150_000, intervals: [5_000] }).toBeGreaterThan(0);
+
+      // FR-IAM-7: an administrator gives them another role. They must not wait out their 15-minute token to get it.
+      addRole(person.username, 'auditor');
+      await expect
+        .poll(async () => {
+          await p.goto('/projects');
+          if (/\/login/.test(p.url())) await p.getByTestId('signin').click(); // sent to sign in again: silent while their Keycloak session lives
+          await p.waitForURL(/\/projects/);
+          return p.getByRole('link', { name: 'Audit log' }).count();
+        }, { timeout: 180_000, intervals: [5_000] })
+        .toBeGreaterThan(0);
+
+      // The audit log tells the story: the change, and the refused old token.
+      await expect.poll(() => seen('action=auth.admin.realm_role_mapping.create'), { timeout: 60_000, intervals: [5_000] }).toBeGreaterThan(0);
+      await expect.poll(() => seen(`action=auth.token_revoked&actor=${person.username}`), { timeout: 60_000, intervals: [5_000] }).toBeGreaterThan(0);
+    } finally {
+      await p.context().close();
+    }
+  });
+
+  test('12. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
     test.setTimeout(150_000);
     await page.goto(`/projects/${state.projectId}`);
     await page.locator('#key-name').fill('e2e-ci');
