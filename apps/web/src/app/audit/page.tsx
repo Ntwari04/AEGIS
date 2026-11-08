@@ -13,11 +13,17 @@ type Page = { items: Entry[]; total: number; page: number; pageSize: number };
 const PAGE_SIZE = 50;
 const STATUS: Record<Entry['result'], string> = { SUCCESS: 'SUCCESS', DENIED: 'FAILED', ERROR: 'FAILED' };
 
-/** Short, readable form of the details column; the full value is in the CSV export. */
+const UUID = /\b([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+/** Long ids are shortened to their first eight characters on screen; the CSV export keeps them whole. */
+const shorten = (s: string) => s.replace(UUID, '$1…');
+
+/** The details column as `key value` pairs a person can scan, instead of raw JSON. The full record is in the CSV export. */
 function details(m: unknown): string {
-  if (m === null || m === undefined) return '';
-  const s = JSON.stringify(m);
-  return s.length > 140 ? `${s.slice(0, 140)}…` : s;
+  if (m === null || typeof m !== 'object') return m === null || m === undefined ? '' : shorten(String(m));
+  return Object.entries(m as Record<string, unknown>)
+    .filter(([k]) => k !== 'adminRealm')
+    .map(([k, v]) => `${k} ${shorten(typeof v === 'string' ? v : JSON.stringify(v))}`)
+    .join('  ·  ');
 }
 
 /** FR-AUDIT-3: search, filter and export the audit log. Read-only; platform admins and auditors only (the API enforces it too). */
@@ -76,12 +82,12 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
             {data.items.map((e) => (
               <tr key={e.id} data-testid="audit-row">
                 <td className="muted">{new Date(e.createdAt).toLocaleString()}</td>
-                <td>{e.actorName ?? <span className="muted">system</span>}</td>
+                <td className="cell-wrap">{e.actorName ? shorten(e.actorName) : <span className="muted">system</span>}</td>
                 <td className="mono">{e.action}</td>
                 <td><span className="status" data-status={STATUS[e.result]}>{e.result}</span></td>
                 <td className="mono">{e.targetType ? `${e.targetType}${e.targetId ? ` ${e.targetId.slice(0, 8)}` : ''}` : ''}</td>
                 <td className="mono muted">{e.sourceIp ?? ''}</td>
-                <td className="mono muted">{details(e.metadata)}</td>
+                <td className="mono muted cell-wrap">{details(e.metadata)}</td>
               </tr>
             ))}
           </tbody>

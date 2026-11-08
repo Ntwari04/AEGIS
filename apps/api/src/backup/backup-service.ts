@@ -33,6 +33,8 @@ export interface BackupConfig {
   encryptionKey: Buffer;
   /** Restore time objective (PRD 7): a drill slower than this is reported as outside the RTO. Default 4 h. */
   rtoSeconds: number;
+  /** Waits between attempts when a scheduled backup or drill fails on a network error (default 30 s, then 2 min). */
+  retryDelaysMs?: number[];
   keyPrefix: string;
   retention?: RetentionPolicy;
   /** How long a MANUAL backup is kept before it expires (default 30 days). */
@@ -50,6 +52,9 @@ const quoteIdent = (name: string) => {
 };
 const stamp = (d: Date) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 500);
+
+/** The network, not the backup, failed: DNS not yet back after the machine woke, a dropped connection, a storage hiccup. */
+const TRANSIENT = /ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket hang up|fetch failed|getaddrinfo|network|timeout/i;
 
 function tap(onChunk: (c: Buffer) => void) {
   return new Transform({ transform(chunk, _e, cb) { onChunk(chunk); cb(null, chunk); } });
@@ -135,9 +140,24 @@ export class BackupService {
   }
 
   /** Nightly run (FR-BACKUP-1). One target failing never stops the others; the result of each is its BackupJob row. */
+  /**
+   * Runs `attempt` again, after a pause, when it failed only because of the network. A failure that is not about the network
+   * (a bad checksum, a row-count mismatch, a wrong key) is returned at once: retrying would only hide it. Every attempt keeps its own
+   * history row, so nothing is concealed; only the LAST outcome drives the alert.
+   */
+  private async retryingOnNetworkErrors<T extends { status: string; error?: string | null }>(attempt: () => Promise<T>): Promise<T> {
+    let result = await attempt();
+    for (const delay of this.cfg.retryDelaysMs ?? [30_000, 120_000]) {
+      if (result.status !== 'FAILED' || !TRANSIENT.test(result.error ?? '')) break;
+      await new Promise((r) => setTimeout(r, delay));
+      result = await attempt();
+    }
+    return result;
+  }
+
   async backupAll(kind: 'SCHEDULED' | 'MANUAL' = 'SCHEDULED') {
     const results = [];
-    for (const t of await this.allTargets()) results.push(await this.backup(t, { kind }));
+    for (const t of await this.allTargets()) results.push(await this.retryingOnNetworkErrors(() => this.backup(t, { kind })));
     return results;
   }
 
@@ -270,7 +290,7 @@ export class BackupService {
       const latest = await this.prisma.backupJob.findFirst({
         where: { target: targetKey(t), status: 'SUCCESS', deletedAt: null }, orderBy: { startedAt: 'desc' },
       });
-      if (latest) results.push(await this.restoreToNew(latest.id, { kind: 'DRILL' }));
+      if (latest) results.push(await this.retryingOnNetworkErrors(() => this.restoreToNew(latest.id, { kind: 'DRILL' })));
     }
     return results;
   }

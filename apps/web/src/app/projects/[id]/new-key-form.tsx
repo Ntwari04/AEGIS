@@ -13,7 +13,7 @@ export function NewKeyForm({ projectId }: { projectId: string }) {
     <>
       <form action={action} className="inline" style={{ marginTop: 12 }}>
         <div><label htmlFor="key-name">Name (for example “GitHub Actions”)</label><input id="key-name" name="name" required minLength={2} maxLength={80} autoComplete="off" /></div>
-        <div>
+        <div className="scopes">
           {SCOPES.map((s, i) => (
             <label key={s.value} className="check"><input type="checkbox" name="scopes" value={s.value} defaultChecked={i === 0} /> {s.label}</label>
           ))}

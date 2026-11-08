@@ -11,7 +11,7 @@ import { GenericContainer, StartedTestContainer, Wait } from 'testcontainers';
 import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { PrismaClient } from '@prisma/client';
 import { BackupService, targetKey, type Target } from '../src/backup/backup-service';
-import { S3ObjectStore } from '../src/backup/object-store';
+import { S3ObjectStore, type ObjectStore } from '../src/backup/object-store';
 import { PgTools, type PgConn } from '../src/backup/pg-tools';
 import { recover } from '../src/backup/recover';
 
@@ -287,6 +287,40 @@ describe('restore drill (FR-BACKUP-4) and retention (FR-BACKUP-3)', () => {
       expect(await dbExists(r.targetDatabase)).toBe(false); // scratch is gone
     }
     expect(audit.some((a) => a.action === 'backup.drill' && a.result === 'SUCCESS')).toBe(true);
+  });
+
+  // A store whose first lookups fail the way a laptop just woken from sleep does, or the way a real integrity problem would.
+  const storeFailing = (message: string, times: number) => {
+    const state = { left: times, calls: 0 };
+    const wrapped: ObjectStore = {
+      put: (k, b) => store.put(k, b), get: (k) => store.get(k), delete: (k) => store.delete(k), list: (p) => store.list(p),
+      size: async (k) => { state.calls++; if (state.left-- > 0) throw new Error(message); return store.size(k); },
+    };
+    return { state, svc: new BackupService(prisma, wrapped, tools, { ...(svc as unknown as { cfg: object }).cfg, retryDelaysMs: [0, 0] } as never, undefined) };
+  };
+
+  it('a drill that failed only because the network was down is retried, and the failed attempt stays in the history', async () => {
+    await svc.backup(sys); // make sure there is something to drill
+    const failedBefore = await prisma.restoreJob.count({ where: { status: 'FAILED' } });
+    const flaky = storeFailing('getaddrinfo ENOTFOUND aegis-backups.r2.example', 1);
+    const results = await flaky.svc.drill();
+    expect(results.length).toBeGreaterThan(0);
+    expect(results.every((r) => r.status === 'SUCCESS')).toBe(true); // the retry succeeded, so the alert never sees a failure
+    expect(await prisma.restoreJob.count({ where: { status: 'FAILED' } })).toBe(failedBefore + 1); // nothing is hidden
+  });
+
+  it('a drill that failed for a real reason is NOT retried: retrying would only hide it', async () => {
+    const broken = storeFailing('archive does not match the checksum recorded at backup time', 1_000);
+    const results = await broken.svc.drill();
+    expect(results.every((r) => r.status === 'FAILED')).toBe(true);
+    expect(broken.state.calls).toBe(results.length); // exactly one attempt per target
+  });
+
+  it('gives up after the last retry and records the failure', async () => {
+    const down = storeFailing('getaddrinfo ENOTFOUND aegis-backups.r2.example', 1_000);
+    const results = await down.svc.drill();
+    expect(results.every((r) => r.status === 'FAILED')).toBe(true);
+    expect(down.state.calls).toBe(results.length * 3); // the first try and two retries, for each target
   });
 
   it('cleans up scratch databases left by a crashed worker, and touches nothing else', async () => {

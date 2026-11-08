@@ -62,7 +62,12 @@ export default async function InfraPage({ searchParams }: { searchParams: Promis
             <div>
               <strong>{s.name}</strong> <span className="role">{s.role}</span>{' '}
               {s.cordoned && <span className="sev" data-sev="critical" data-testid="cordoned">cordoned</span>}
-              <div className="muted mono">{s.ipAddress ?? 'no address'} · {s.cpuCores ?? '?'} CPU · {s.memoryMb ? `${Math.round(s.memoryMb / 1024 * 10) / 10} GB` : '?'} RAM · {s.environments} environment(s)</div>
+              <div className="muted mono">{[
+                s.ipAddress ?? 'address not set',
+                s.cpuCores ? `${s.cpuCores} CPU` : 'CPU not set',
+                s.memoryMb ? `${Math.round(s.memoryMb / 1024 * 10) / 10} GB RAM` : 'RAM not set',
+                `${s.environments} environment${s.environments === 1 ? '' : 's'}`,
+              ].join(' · ')}</div>
               {s.cordoned && <div className="note">Cordoned: no new deployments{s.cordonReason ? `. Reason: ${s.cordonReason}` : ''}</div>}
             </div>
           </div>

@@ -47,6 +47,13 @@ describe('parseKeycloakEvent: person events (FR-IAM-6)', () => {
     expect(ev(LOGIN.replace('realmName="aegisops"', 'realmName="someone-elses"'))).toBeNull();
   });
 
+  it('drops routine token exchanges, which only add noise, but keeps their failures', () => {
+    expect(ev(LOGIN.replace('type="LOGIN"', 'type="CODE_TO_TOKEN"'))).toBeNull();
+    expect(ev(LOGIN.replace('type="LOGIN"', 'type="REFRESH_TOKEN"'))).toBeNull();
+    expect(ev(REFRESH_ERROR)).not.toBeNull();
+    expect(ev(LOGIN.replace('type="LOGIN"', 'type="CODE_TO_TOKEN_ERROR"'))).toMatchObject({ action: 'auth.code_to_token_error', result: 'ERROR' });
+  });
+
   it('ignores lines that are not Keycloak events, and events with neither a type nor an operation', () => {
     expect(ev('2026-11-08 INFO [org.keycloak.services] something else type="LOGIN"')).toBeNull();
     expect(ev('[org.keycloak.events] realmName="aegisops"')).toBeNull();

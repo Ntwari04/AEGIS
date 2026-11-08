@@ -56,6 +56,9 @@ export function parseKeycloakEvent(tsNs: string, line: string, realm: string): P
   const known = (v?: string) => (v && v !== 'null' ? v : undefined);
 
   if (p.type) {
+    // Routine token plumbing: every sign-in makes one of each, and a tool that stays signed in makes one per refresh. They say nothing the
+    // sign-in itself does not, and they buried the events an auditor looks for. Their FAILURES (…_ERROR) are different and are kept.
+    if (p.type === 'CODE_TO_TOKEN' || p.type === 'REFRESH_TOKEN') return null;
     const subject = known(p.userId);
     const metadata: Record<string, unknown> = {};
     if (p.realmName && p.realmName !== realm) metadata.realm = p.realmName;
