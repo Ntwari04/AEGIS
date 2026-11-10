@@ -20,7 +20,7 @@ Defaults match the local stack (`https://localtest.me`, self-signed certificate)
 | 7 | Developer isolation | a developer sees no projects, cannot open another project by URL, and `authz.project_denied` is in the audit log |
 | 8 | Auditor | sees the project, databases and servers; is offered no deploy, secret, environment, database, container or cordon control |
 
-Steps 7 to 14 go beyond the eight, covering the screens added after Phase 5:
+Steps 7 to 15 go beyond the eight, covering the screens added after Phase 5:
 
 | # | Step | What the test checks |
 |---|---|---|
@@ -31,7 +31,8 @@ Steps 7 to 14 go beyond the eight, covering the screens added after Phase 5:
 | 11 | Sign-ins and role changes | a sign-in appears in the audit log (Keycloak, Promtail, Loki, API); an administrator adds a role and the person's navigation changes within about a minute; the change and the refused old token are in the audit log |
 | 12 | API reference | `/api/docs` lists the operations with the roles the guard checks and the validation rules; the downloaded `openapi.json` is a valid document; signed out, both lead to the sign-in page |
 | 13 | Page security policy | every main page has a nonce policy with no `'unsafe-inline'` for scripts, every inline script carries that request's nonce and it changes each time, the page trips no violation of its own policy, and an injected inline event handler and inline `<script>` are refused |
-| 14 | CI key | a key is shown once and only its prefix afterwards; it triggers a deployment of its own project; after revoking it, the same call returns `401` |
+| 14 | Live logs | lines written into a deployed container's output appear in the live view; after a pause and resume each line appears exactly once; a non-member gets 404 and a signed-out visitor is sent to sign in |
+| 15 | CI key | a key is shown once and only its prefix afterwards; it triggers a deployment of its own project; after revoking it, the same call returns `401` |
 
 ## Things to know
 

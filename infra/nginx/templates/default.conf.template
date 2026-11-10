@@ -75,6 +75,23 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    # Live logs (server-sent events). The default route buffers responses, speaks HTTP/1.0 to the web app and gives up on a quiet
+    # connection after 60 s: a stream would arrive in lumps, or not at all. Never buffer it, never compress it, and allow it to live
+    # (the dashboard sends a heartbeat every 15 s and the API ends a stream after 30 minutes).
+    location ~ ^/projects/[^/]+/environments/[^/]+/logs/stream$ {
+        proxy_pass $web;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        proxy_read_timeout 3600s;
+    }
+
     location / {
         proxy_pass $web;
         proxy_set_header Host $host;

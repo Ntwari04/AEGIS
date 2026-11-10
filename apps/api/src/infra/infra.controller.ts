@@ -1,7 +1,9 @@
 import {
-  BadRequestException, Body, ConflictException, Controller, ForbiddenException, Get, HttpCode, Inject, Injectable, Module, NotFoundException,
-  OnModuleDestroy, Param, Post, Query, ServiceUnavailableException,
+  BadRequestException, Body, ConflictException, Controller, ForbiddenException, Get, Header, Headers, HttpCode, HttpException, HttpStatus, Inject, Injectable,
+  Module, NotFoundException, OnModuleDestroy, Param, Post, Query, Req, Res, ServiceUnavailableException,
 } from '@nestjs/common';
+import type { Request, Response } from 'express';
+import { parseCursor, streamLogs, toSse } from './log-stream';
 import { Queue } from 'bullmq';
 import { IsInt, IsOptional, IsString, Length, Matches, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -65,6 +67,24 @@ export class LogsQuery {
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(500) limit: number = 200;
   @IsOptional() @IsString() @Length(1, 100) q?: string;
 }
+
+export class LogStreamQuery {
+  @IsOptional() @IsString() @Length(1, 100) q?: string;
+  /** How many seconds of recent history to send before going live. */
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(600) backlog: number = 60;
+  /** Resume after this cursor (the `id` of the last line received): a reconnecting browser sends it back. */
+  @IsOptional() @Matches(/^\d{16,20}$/, { message: 'since must be a log cursor' }) since?: string;
+}
+
+const intEnv = (name: string, fallback: number) => (Number.isFinite(Number(process.env[name])) && Number(process.env[name]) > 0 ? Number(process.env[name]) : fallback);
+/** Live streams are cheap but not free (each polls Loki): a person gets a few, the platform a bounded number. */
+const streamLimits = () => ({
+  perUser: intEnv('LOG_STREAM_MAX_PER_USER', 3),
+  total: intEnv('LOG_STREAM_MAX_TOTAL', 20),
+  maxMs: intEnv('LOG_STREAM_MAX_SECONDS', 1800) * 1000,
+  pollMs: intEnv('LOG_STREAM_POLL_MS', 2000),
+  heartbeatMs: intEnv('LOG_STREAM_HEARTBEAT_MS', 15_000),
+});
 
 @Controller()
 export class InfraController {
@@ -215,6 +235,53 @@ export class InfraController {
       return { lines: await this.monitoring.logs(env.project.slug, env.name, { minutes: q.minutes, limit: q.limit, contains: q.q }) };
     } catch (e) {
       throw new ServiceUnavailableException(`Logs are unavailable: ${(e as Error).message}`);
+    }
+  }
+
+  private readonly liveByUser = new Map<string, number>();
+  private liveTotal = 0;
+
+  /**
+   * Live logs of an environment as server-sent events (FR-INFRA-2). Same access rule and the same project-bound query as the search
+   * above. Heartbeats keep proxies from closing an idle stream; the stream ends after a maximum time and the browser resumes from the
+   * `id` of the last line it saw, so nothing is lost or repeated across a reconnect.
+   */
+  @Get('projects/:projectId/environments/:envId/logs/stream')
+  @Roles('platform_admin', 'devops_engineer', 'developer', 'auditor')
+  @ProjectAccess('read')
+  @Header('Content-Type', 'text/event-stream')
+  async stream(
+    @Param('projectId') projectId: string, @Param('envId') envId: string, @Query() q: LogStreamQuery,
+    @Headers('last-event-id') lastEventId: string | undefined, @CurrentUser() user: AuthUser, @Req() req: Request, @Res() res: Response,
+  ) {
+    const env = await this.environment(projectId, envId);
+    if (!process.env.LOKI_URL) throw new ServiceUnavailableException('Logs are unavailable: log search is not configured');
+    const limits = streamLimits();
+    if (this.liveTotal >= limits.total || (this.liveByUser.get(user.id) ?? 0) >= limits.perUser) {
+      throw new HttpException(`Too many live log views open (at most ${limits.perUser} each). Close one and try again.`, HttpStatus.TOO_MANY_REQUESTS);
+    }
+    this.liveTotal++;
+    this.liveByUser.set(user.id, (this.liveByUser.get(user.id) ?? 0) + 1);
+
+    const ctl = new AbortController();
+    req.on('close', () => ctl.abort());
+    res.status(200).set({ 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+    res.flushHeaders();
+    res.write(': connected\n\n');
+    try {
+      // A cursor is the id of a line the browser ALREADY HAS, so resume just after it (Loki's start is inclusive: from it, the line would repeat).
+      const resumeAfter = parseCursor(q.since) ?? parseCursor(lastEventId);
+      const sinceNs = resumeAfter !== null ? resumeAfter + 1n : (BigInt(Date.now()) - BigInt(q.backlog) * 1000n) * 1_000_000n;
+      for await (const e of streamLogs(this.monitoring, env.project.slug, env.name, {
+        sinceNs, contains: q.q, pollMs: limits.pollMs, heartbeatMs: limits.heartbeatMs, maxMs: limits.maxMs, signal: ctl.signal,
+      })) {
+        if (!res.write(toSse(e))) await new Promise<void>((r) => res.once('drain', r)); // a slow reader slows the stream, it does not grow a buffer
+      }
+    } finally {
+      this.liveTotal--;
+      const left = (this.liveByUser.get(user.id) ?? 1) - 1;
+      if (left <= 0) this.liveByUser.delete(user.id); else this.liveByUser.set(user.id, left);
+      res.end();
     }
   }
 }

@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
+import { LiveLogs } from './live-logs';
 
 type Line = { ts: string; line: string; container: string };
 
@@ -24,6 +25,7 @@ export default async function LogsPage({
     <>
       <p><Link href={`/projects/${id}`}>← Back to project</Link></p>
       <h1>Logs</h1>
+      <p className="note">Follow the logs live, or search what was already written.</p>
       <form method="get" className="inline card">
         <div><label htmlFor="q">Contains</label><input id="q" name="q" defaultValue={q} maxLength={100} placeholder="error" /></div>
         <div>
@@ -34,6 +36,7 @@ export default async function LogsPage({
         </div>
         <button data-testid="search-logs">Search</button>
       </form>
+      <LiveLogs projectId={id} envId={envId} contains={q.slice(0, 100)} />
       {problem && <p className="error" data-testid="logs-problem">{problem}</p>}
       <div className="card">
         {lines.length === 0 && !problem ? <p className="muted" data-testid="no-logs">No log lines in this period.</p> : (

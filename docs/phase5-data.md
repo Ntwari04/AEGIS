@@ -9,7 +9,7 @@
 | Provision a PostgreSQL database + a least-privilege role from the dashboard | project page → Databases | `platform_admin`, project `devops_engineer` |
 | On-demand backup, history, restore to a NEW database | database page | `platform_admin`, project `devops_engineer`; auditors read |
 | Overwrite a live database | database page → Restore… | `platform_admin` only, name typed back + reason |
-| Servers, container start/stop/restart, log search | Infrastructure page, project page | see "Roles" |
+| Servers, container start/stop/restart, log search and a live log view | Infrastructure page, project page | see "Roles" |
 | Cordon, uncordon, drain | Infrastructure page | `platform_admin` only, name typed back + reason |
 
 ## Recovery objectives (PRD 7)

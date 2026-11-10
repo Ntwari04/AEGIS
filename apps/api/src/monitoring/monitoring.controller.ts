@@ -78,6 +78,25 @@ export class MonitoringClient {
     return out.sort((a, b) => (a.ts < b.ts ? 1 : -1)).slice(0, opts.limit);
   }
 
+  /**
+   * Log lines of ONE environment newer than (or at) `sinceNs`, oldest first, for the live stream. The query is the same fixed,
+   * escaped LogQL as `logs()`: only the project, environment and an optional plain substring ever reach it.
+   */
+  async tail(project: string, environment: string, sinceNs: bigint, opts: { limit: number; contains?: string }): Promise<{ ns: string; line: string; container: string }[]> {
+    const base = process.env.LOKI_URL;
+    if (!base) throw new Error('log search is not configured (LOKI_URL)');
+    const esc = (v: string) => v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    if (opts.contains && /[\r\n\0]/.test(opts.contains)) throw new Error('invalid search text');
+    const query = `{project="${esc(project)}", environment="${esc(environment)}"}${opts.contains ? ` |= "${esc(opts.contains)}"` : ''}`;
+    const end = (BigInt(Date.now()) + 5_000n) * 1_000_000n;
+    const body = await this.getJson(`${base}/loki/api/v1/query_range?query=${encodeURIComponent(query)}&start=${sinceNs}&end=${end}&limit=${opts.limit}&direction=forward`);
+    const out: { ns: string; line: string; container: string }[] = [];
+    for (const s of (body.data?.result ?? []) as { stream: Record<string, string>; values: [string, string][] }[]) {
+      for (const [ns, line] of s.values) out.push({ ns, line: line.slice(0, 4000), container: s.stream.container ?? '' });
+    }
+    return out.sort((a, b) => (BigInt(a.ns) < BigInt(b.ns) ? -1 : BigInt(a.ns) > BigInt(b.ns) ? 1 : 0));
+  }
+
   /** Firing alerts. Empty (not an error) when Alertmanager is not configured. */
   async alerts(): Promise<AlertDto[]> {
     if (!this.alertmanager) return [];

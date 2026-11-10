@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { expect, test, type Browser, type Page } from '@playwright/test';
 import { addRole, createUser, deleteUser } from '../helpers/keycloak';
@@ -379,7 +380,52 @@ test.describe.serial('definition of done', () => {
     expect(violations.length).toBeGreaterThan(0);
   });
 
-  test('14. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
+  test('14. live logs follow the application as it writes, resume after a pause without repeating, and refuse outsiders', async ({ browser }) => {
+    test.setTimeout(300_000);
+    const marker = `live-${tag}`;
+    // The deployed app is only started for a moment; write straight to the container's output, as an application's own logging would.
+    const container = execFileSync('docker', ['ps', '--filter', `name=aegis-${slug}-staging`, '--format', '{{.Names}}'], { encoding: 'utf8' }).trim().split('\n')[0];
+    expect(container, 'the test environment must be running').toBeTruthy();
+    const say = (text: string) => execFileSync('docker', ['exec', container, 'sh', '-c', `echo '${text}' > /proc/1/fd/1`]);
+
+    await page.goto(`/projects/${state.projectId}`);
+    const logsHref = (await page.getByTestId('logs-staging').getAttribute('href'))!;
+    await page.goto(logsHref);
+    await expect(page.getByTestId('live-status')).toHaveText('Not started');
+    await page.getByTestId('live-start').click();
+    await expect(page.getByTestId('live-status')).toHaveText('Live', { timeout: 30_000 });
+
+    say(`${marker} one`);
+    await expect(page.getByTestId('live-lines')).toContainText(`${marker} one`, { timeout: 90_000 }); // container -> Promtail -> Loki -> API -> browser
+
+    await page.getByTestId('live-pause').click();
+    await expect(page.getByTestId('live-status')).toHaveText('Paused');
+    say(`${marker} two`);
+    say(`${marker} three`);
+    await page.getByTestId('live-start').click(); // resumes after the last line it has
+    await expect(page.getByTestId('live-lines')).toContainText(`${marker} three`, { timeout: 90_000 });
+    const shown = await page.getByTestId('live-lines').innerText();
+    for (const n of ['one', 'two', 'three']) expect(shown.split(`${marker} ${n}`).length - 1, `"${n}" appears exactly once`).toBe(1);
+
+    // Outsiders: someone who is not a member of the project gets nothing, and neither does a signed-out visitor.
+    const envId = /environments\/([^/]+)\/logs/.exec(logsHref)![1];
+    const streamUrl = `/projects/${state.projectId}/environments/${envId}/logs/stream`;
+    const outsider = await createUser('developer', { temporary: true });
+    created.push(outsider.id);
+    const dev = await freshPage(browser);
+    const anon = await freshPage(browser);
+    try {
+      await signIn(dev, outsider);
+      expect((await dev.request.get(streamUrl)).status()).toBe(404);
+      const signedOut = await anon.request.get(streamUrl);
+      expect(signedOut.url()).toMatch(/\/login/); // sent to sign in, not given a stream
+    } finally {
+      await dev.context().close();
+      await anon.context().close();
+    }
+  });
+
+  test('15. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
     test.setTimeout(150_000);
     await page.goto(`/projects/${state.projectId}`);
     await page.locator('#key-name').fill('e2e-ci');

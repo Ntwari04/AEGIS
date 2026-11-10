@@ -44,7 +44,12 @@ const enqueued: string[] = [];
 const dataJobs: { name: string; data: any }[] = [];
 const containerJobs: any[] = [];
 const logCalls: { project: string; environment: string; opts: any }[] = [];
-const infraStub = { lokiDown: false };
+const infraStub = {
+  lokiDown: false,
+  /** What the live-stream tests want Loki to return, and what it was asked. */
+  tailLines: [] as { ns: string; line: string; container: string }[],
+  tailCalls: [] as { project: string; environment: string; sinceNs: bigint; contains?: string }[],
+};
 
 /** A signed GitHub "Build image" workflow_run delivery. */
 async function signedWorkflowRun(repo: string, sha: string, branch: string) {
@@ -128,6 +133,11 @@ beforeAll(async () => {
     GITHUB_WEBHOOK_SECRET: WH_SECRET,
     SECRETS_ENCRYPTION_KEY: randomBytes(32).toString('base64'),
     GRAFANA_PUBLIC_URL: 'https://grafana.test.example',
+    // Loki itself is stubbed below; the URL only has to be set. Keycloak events are not read from it in tests.
+    LOKI_URL: 'http://loki.test',
+    KEYCLOAK_EVENTS_INGEST: 'off',
+    // Short live streams so a test can read one to its end.
+    LOG_STREAM_MAX_SECONDS: '2', LOG_STREAM_POLL_MS: '100', LOG_STREAM_HEARTBEAT_MS: '300',
   });
 
   const { AppModule } = await import('../src/app.module');
@@ -155,6 +165,11 @@ beforeAll(async () => {
         return [{ ts: new Date().toISOString(), line: 'listening on 3000', container: 'aegis-infra-proj-staging-1' }];
       },
       alerts: async () => monitoring.alerts,
+      tail: async (project: string, environment: string, sinceNs: bigint, opts: { contains?: string }) => {
+        infraStub.tailCalls.push({ project, environment, sinceNs, contains: opts.contains });
+        if (infraStub.lokiDown) throw new Error('loki is down');
+        return infraStub.tailLines.filter((l) => BigInt(l.ns) >= sinceNs && (!opts.contains || l.line.includes(opts.contains)));
+      },
     })
     .overrideProvider(CONTAINER_JOB_QUEUE).useValue({ enqueue: async (j: any) => void containerJobs.push(j) })
     .overrideProvider(DATA_JOB_QUEUE).useValue({ enqueue: async (j: { name: string; data: any }) => void dataJobs.push(j) })
@@ -1344,6 +1359,90 @@ describe('infrastructure management: servers, container controls, logs, cordon a
     it('reports log search as unavailable (503) instead of failing opaquely', async () => {
       infraStub.lokiDown = true;
       try { await logs('it-dev-a').expect(503); } finally { infraStub.lokiDown = false; }
+    });
+
+    describe('live stream', () => {
+      const readText = (res: any, cb: (e: Error | null, body: string) => void) => {
+        res.setEncoding('utf8');
+        let data = '';
+        res.on('data', (c: string) => (data += c));
+        res.on('end', () => cb(null, data));
+      };
+      const stream = (user: string, qs = '', headers: Record<string, string> = {}) =>
+        http().get(`/api/v1/projects/${projectId}/environments/${stagingId}/logs/stream${qs}`).set(as(user)).set(headers).buffer(true).parse(readText as never);
+      const ns = (msAgo: number) => String((BigInt(Date.now()) - BigInt(msAgo)) * 1_000_000n);
+      beforeEach(() => { infraStub.tailLines = []; infraStub.tailCalls.length = 0; infraStub.lokiDown = false; });
+
+      it('streams lines as server-sent events, with heartbeats, ends after its maximum time, and tells the browser where to resume', async () => {
+        infraStub.tailLines = [{ ns: ns(5000), line: 'first line', container: 'c1' }, { ns: ns(3000), line: 'second line', container: 'c1' }];
+        const res = await stream('it-dev-a');
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toMatch(/text\/event-stream/);
+        expect(res.headers['cache-control']).toMatch(/no-transform/);
+        expect(res.headers['x-accel-buffering']).toBe('no'); // Nginx must not hold the stream back
+        const body = res.body as unknown as string;
+        expect(body.startsWith(': connected')).toBe(true);
+        expect(body).toMatch(/event: line\nid: \d+\ndata: \{"ts":"[^"]+","line":"first line","container":"c1"\}/);
+        expect(body.indexOf('first line')).toBeLessThan(body.indexOf('second line'));
+        expect(body).toContain(': heartbeat');
+        expect(body).toMatch(/event: end\ndata: \{"reason":"This live view ran its maximum time/);
+      });
+
+      it('is open to members, operators and auditors, and to nobody else', async () => {
+        const ok = await Promise.all(['it-dev-a', 'it-devops', 'it-admin', 'it-auditor'].map((u) => stream(u)));
+        expect(ok.map((r) => r.status)).toEqual([200, 200, 200, 200]);
+        await stream('it-dev-b').expect(404); // not a member: the project does not exist for them
+        await http().get(`/api/v1/projects/${projectId}/environments/${stagingId}/logs/stream`).expect(401);
+      });
+
+      it('binds the query to this project and environment, and honours the search text and the backlog', async () => {
+        await stream('it-dev-a', '?q=error&backlog=10');
+        const call = infraStub.tailCalls[0];
+        expect(call).toMatchObject({ project: 'infra-proj', environment: 'staging', contains: 'error' });
+        const agoMs = Date.now() - Number(call.sinceNs / 1_000_000n);
+        expect(agoMs).toBeGreaterThan(9_000);
+        expect(agoMs).toBeLessThan(13_000);
+      });
+
+      it('resumes just after the last line the browser has: nothing lost, nothing repeated', async () => {
+        const first = ns(5000);
+        infraStub.tailLines = [{ ns: first, line: 'already seen', container: 'c1' }, { ns: ns(3000), line: 'not yet seen', container: 'c1' }];
+        const body = (await stream('it-dev-a', '', { 'Last-Event-ID': first })).body as unknown as string;
+        expect(body).toContain('not yet seen');
+        expect(body).not.toContain('already seen');
+        const viaQuery = (await stream('it-dev-a', `?since=${first}`)).body as unknown as string;
+        expect(viaQuery).toContain('not yet seen');
+        expect(viaQuery).not.toContain('already seen');
+      });
+
+      it('refuses bad parameters', async () => {
+        await stream('it-dev-a', '?backlog=601').expect(400);
+        await stream('it-dev-a', '?backlog=-1').expect(400);
+        await stream('it-dev-a', '?since=abc').expect(400);
+        await stream('it-dev-a', `?q=${'x'.repeat(101)}`).expect(400);
+      });
+
+      it('allows a person only a few at once: the fourth is refused with 429, and a slot frees up when one ends', async () => {
+        const four = await Promise.all([1, 2, 3, 4].map(() => stream('it-devops')));
+        expect(four.map((r) => r.status).sort()).toEqual([200, 200, 200, 429]);
+        expect((await stream('it-devops')).status).toBe(200); // all four are over: a new one is accepted again
+      });
+
+      it('says so when log search breaks, retries, then stops instead of polling a dead Loki forever', async () => {
+        infraStub.lokiDown = true;
+        const body = (await stream('it-dev-a')).body as unknown as string;
+        expect(body).toContain('event: notice');
+        expect(body).toContain('Log search is unavailable right now; retrying.');
+        expect(body).toMatch(/event: end\ndata: \{"reason":"Log search stayed unavailable; stopped\./);
+      });
+
+      it('is documented in the API reference with its content type', async () => {
+        const doc = (await http().get('/api/v1/openapi.json').set(as('it-dev-a')).expect(200)).body;
+        const op = doc.paths['/projects/{projectId}/environments/{envId}/logs/stream'].get;
+        expect(op['x-roles']).toEqual(['platform_admin', 'devops_engineer', 'developer', 'auditor']);
+        expect(op['x-project-access']).toBe('read');
+        expect(op.responses['200'].content['text/event-stream']).toBeDefined();
+      });
     });
   });
 

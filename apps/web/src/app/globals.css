@@ -76,3 +76,6 @@ select { width:100%; padding:8px 10px; background:var(--bg); color:var(--fg); bo
 .method[data-method=post] { color:var(--accent); }
 .method[data-method=put], .method[data-method=patch] { color:var(--warn); }
 .method[data-method=delete] { color:var(--bad); }
+
+/* Live logs */
+.live-box { margin:12px 0 0; max-height:360px; min-height:120px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px; }
