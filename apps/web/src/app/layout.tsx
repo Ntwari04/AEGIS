@@ -5,6 +5,8 @@ import { signOutEverywhere } from './sign-out';
 import './globals.css';
 
 export const metadata = { title: 'AegisOps' };
+// Every page is rendered per request: a statically built page cannot carry the per-request nonce the Content-Security-Policy needs.
+export const dynamic = 'force-dynamic';
 
 export default async function RootLayout({ children }: { children: ReactNode }) {
   const session = await auth();

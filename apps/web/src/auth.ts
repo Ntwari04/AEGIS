@@ -2,6 +2,7 @@ import NextAuth from 'next-auth';
 import Keycloak from 'next-auth/providers/keycloak';
 import type { JWT } from 'next-auth/jwt';
 import { ROLES, type Role } from '@aegisops/shared-types';
+import { pathIsOpen, sessionIsUsable } from '@/lib/access';
 
 /**
  * OIDC Authorization Code + PKCE against Keycloak (FR-IAM-1). This app never sees a password.
@@ -76,9 +77,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return session;
     },
     authorized({ auth: session, request }) {
-      const open = ['/login', '/api/auth', '/session-ended'].some((p) => request.nextUrl.pathname.startsWith(p));
-      if (open) return true;
-      return !!session?.user && (session as any).error !== 'RefreshTokenError';
+      // The middleware (src/middleware.ts) enforces the same rule itself; both read it from lib/access.ts.
+      return pathIsOpen(request.nextUrl.pathname) || sessionIsUsable(session as any);
     },
   },
 });

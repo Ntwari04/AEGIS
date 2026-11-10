@@ -331,7 +331,55 @@ test.describe.serial('definition of done', () => {
     }
   });
 
-  test('13. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
+  test('13. the page policy lets only nonce-marked scripts run, the app works under it, and injected script is refused', async () => {
+    test.setTimeout(240_000);
+    const violations: string[] = [];
+    await page.exposeFunction('reportViolation', (v: string) => violations.push(v));
+    await page.addInitScript(() => {
+      document.addEventListener('securitypolicyviolation', (e) => (window as unknown as { reportViolation: (v: string) => void }).reportViolation(`${e.violatedDirective} ${e.blockedURI || 'inline'}`));
+    });
+    const policies: string[] = [];
+    page.on('response', (r) => { if (r.request().resourceType() === 'document') policies.push(r.headers()['content-security-policy'] ?? ''); });
+
+    const inlineScripts = () => page.evaluate(() => [...document.scripts].filter((s) => !s.src).map((s) => s.nonce));
+    for (const url of ['/projects', `/projects/${state.projectId}`, '/audit', '/backups', '/infra', '/api/docs']) {
+      await page.goto(url);
+      await page.waitForLoadState('networkidle');
+      const nonce = /'nonce-([^']+)'/.exec(policies[policies.length - 1] ?? '')?.[1];
+      expect(nonce, `${url} must carry a nonce policy`).toBeTruthy();
+      const nonces = await inlineScripts();
+      expect(nonces.length).toBeGreaterThan(0); // Next.js's own bootstrap scripts
+      expect(nonces.every((n) => n === nonce), `every inline script on ${url} carries this request's nonce`).toBe(true);
+    }
+    await page.getByTestId('api-op-get-/audit-log').locator('summary').click(); // interactive page parts still work
+
+    // The policy: nonce plus strict-dynamic, no 'unsafe-inline' for scripts, nothing framed, nonce different every time.
+    const last = policies[policies.length - 1];
+    const scriptSrc = /script-src ([^;]+)/.exec(last)![1];
+    expect(scriptSrc).toContain("'strict-dynamic'");
+    expect(scriptSrc).not.toContain("'unsafe-inline'");
+    expect(last).toContain("object-src 'none'");
+    expect(last).toContain("frame-ancestors 'none'");
+    expect(new Set(policies.map((p) => /'nonce-([^']+)'/.exec(p)?.[1])).size).toBe(policies.length);
+
+    expect(violations, 'the dashboard must not trip its own policy').toEqual([]);
+
+    // An attacker who gets MARKUP into the page cannot run script: an inline event handler is refused, and so is a parser-inserted inline
+    // <script> (here in a framed document, which inherits the page's policy and has no nonce). The one thing 'strict-dynamic' allows by
+    // design is a script CREATED by code that is already trusted (createElement), so that is not what is tested here: it needs script
+    // execution already, which is what the policy exists to prevent.
+    await page.evaluate(() => {
+      document.body.insertAdjacentHTML('beforeend', '<img src="x" onerror="window.__pwned = true">');
+      const frame = document.createElement('iframe');
+      frame.srcdoc = '<script>parent.__pwned2 = true</script>';
+      document.body.appendChild(frame);
+    });
+    await page.waitForTimeout(800);
+    expect(await page.evaluate(() => [(window as unknown as { __pwned?: boolean }).__pwned, (window as unknown as { __pwned2?: boolean }).__pwned2])).toEqual([undefined, undefined]);
+    expect(violations.length).toBeGreaterThan(0);
+  });
+
+  test('14. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
     test.setTimeout(150_000);
     await page.goto(`/projects/${state.projectId}`);
     await page.locator('#key-name').fill('e2e-ci');
