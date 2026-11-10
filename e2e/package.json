@@ -2,6 +2,6 @@
   "name": "@aegisops/e2e",
   "version": "0.1.0",
   "private": true,
-  "scripts": { "test": "playwright test", "lint": "echo skip" },
+  "scripts": { "test": "playwright test", "measure": "playwright test -c playwright.measure.config.ts", "cleanup": "node scripts/cleanup.mjs", "lint": "echo skip" },
   "devDependencies": { "@playwright/test": "^1.55.0", "@types/node": "^22.0.0", "otpauth": "^9.3.0", "typescript": "^5.6.0" }
 }

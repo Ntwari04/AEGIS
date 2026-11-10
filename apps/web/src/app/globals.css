@@ -66,3 +66,13 @@ select { width:100%; padding:8px 10px; background:var(--bg); color:var(--fg); bo
   .stats { gap:16px 24px; }
   .row { align-items:flex-start; }
 }
+
+/* API reference (/api/docs) */
+.operation { border-top:1px solid var(--line); padding:8px 0; }
+.operation summary { cursor:pointer; display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.operation .roles { margin-left:auto; display:flex; flex-wrap:wrap; gap:4px; }
+.method { display:inline-block; min-width:56px; text-align:center; font-size:12px; font-weight:700; border-radius:4px; padding:1px 6px; border:1px solid currentColor; }
+.method[data-method=get] { color:var(--good); }
+.method[data-method=post] { color:var(--accent); }
+.method[data-method=put], .method[data-method=patch] { color:var(--warn); }
+.method[data-method=delete] { color:var(--bad); }

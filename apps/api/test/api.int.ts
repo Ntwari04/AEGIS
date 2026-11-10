@@ -413,6 +413,86 @@ describe('audit log is append-only in the database (FR-AUDIT-2)', () => {
   });
 });
 
+describe('OpenAPI document, and the authorization rule across EVERY controller (PRD 8.2, 10)', () => {
+  type Route = { controller: string; handler: string; method: string; path: string; roles: string[]; public: boolean };
+  let routes: Route[];
+  let spec: any;
+  const oa = (p: string) => p.replace(/:([A-Za-z0-9_]+)/g, '{$1}');
+
+  beforeAll(async () => {
+    const { ModulesContainer } = await import('@nestjs/core');
+    const { allControllers } = await import('../src/docs/docs.controller');
+    const { routesOf } = await import('../src/docs/openapi');
+    routes = routesOf(allControllers(app.get(ModulesContainer)));
+    spec = (await http().get('/api/v1/openapi.json').set(as('it-dev-a')).expect(200)).body;
+  });
+
+  it('is available to every signed-in role and to nobody else', async () => {
+    await http().get('/api/v1/openapi.json').expect(401);
+    for (const u of ['it-admin', 'it-devops', 'it-dev-a', 'it-auditor']) await http().get('/api/v1/openapi.json').set(as(u)).expect(200);
+    expect(spec.openapi).toBe('3.0.3');
+  });
+
+  it('sees every controller in the application, not a hand-kept list', () => {
+    const controllers = new Set(routes.map((r) => r.controller));
+    for (const c of ['ProjectsController', 'DeploymentsController', 'WebhooksController', 'CiController', 'SecretsController', 'DataController', 'InfraController', 'MonitoringController', 'AuditController', 'UsersController', 'DocsController']) {
+      expect([...controllers]).toContain(c);
+    }
+    expect(controllers.has('MetricsController')).toBe(false); // outside the public API tree
+    expect(routes.length).toBeGreaterThan(40);
+  });
+
+  it('every route of every controller declares @Roles or @Public, and every project route declares project access', () => {
+    const noAuthorization = routes.filter((r) => !r.public && r.roles.length === 0).map((r) => `${r.controller}.${r.handler}`);
+    expect(noAuthorization).toEqual([]);
+    const noProjectAccess = routes
+      .filter((r) => r.path.includes(':projectId') && spec.paths[oa(r.path)][r.method]['x-project-access'] === undefined)
+      .map((r) => `${r.controller}.${r.handler}`);
+    expect(noProjectAccess).toEqual([]);
+  });
+
+  it('documents every route', () => {
+    const missing = routes.filter((r) => spec.paths[oa(r.path)]?.[r.method] === undefined).map((r) => `${r.method} ${r.path}`);
+    expect(missing).toEqual([]);
+  });
+
+  it('only an explicit allowlist of routes is public', () => {
+    const open = routes.filter((r) => r.public).map((r) => `${r.method} ${r.path}`).sort();
+    expect(open).toEqual(['get /health', 'post /ci/deployments', 'post /webhooks/github'].sort());
+  });
+
+  it('an auditor can never change anything, on any route: only signing out is open to them', () => {
+    const auditorMayChange = routes
+      .filter((x) => x.method !== 'get' && !x.public && x.path !== '/me/revoke') // /me/revoke is signing out
+      .filter((x) => x.roles.includes('auditor'))
+      .map((x) => `${x.method} ${x.path}`);
+    expect(auditorMayChange).toEqual([]);
+  });
+
+  it('describes real routes accurately: roles, project access, validation, audit action, content type', () => {
+    const create = spec.paths['/projects/{projectId}/environments'].post;
+    expect(create['x-roles']).toEqual(['platform_admin', 'devops_engineer']);
+    expect(create['x-project-access']).toBe('manage');
+    expect(create['x-audit-action']).toBe('environment.create');
+    const body = create.requestBody.content['application/json'].schema;
+    expect(body.required).toContain('name');
+    expect(body.properties.memoryLimitMb).toMatchObject({ type: 'integer' });
+
+    const audit = spec.paths['/audit-log'].get;
+    expect(audit['x-roles']).toEqual(['platform_admin', 'auditor']);
+    expect(audit.parameters.find((p: any) => p.name === 'result').schema.enum).toEqual(['SUCCESS', 'DENIED', 'ERROR']);
+    expect(spec.paths['/audit-log/export'].get.responses['200'].content['text/csv']).toBeDefined();
+
+    expect(spec.paths['/webhooks/github'].post.security).toEqual([]);
+    expect(spec.paths['/ci/deployments'].post.security).toEqual([{ apiKey: [] }]);
+  });
+
+  it('contains no secrets and no example data: only routes and rules', () => {
+    const text = JSON.stringify(spec);
+    expect(text).not.toMatch(/aegis_[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{20,}|password":"/);
+  });
+});
+
 describe('session revocation and Keycloak events in the audit log (FR-IAM-6, FR-IAM-7)', () => {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   let svc: { ingest: (lines: { ts: string; line: string }[]) => Promise<{ read: number; inserted: number; revoked: number }> };

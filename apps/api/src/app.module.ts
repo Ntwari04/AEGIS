@@ -18,6 +18,7 @@ import { MonitoringModule } from './monitoring/monitoring.controller';
 import { DataModule } from './backup/data.controller';
 import { InfraModule } from './infra/infra.controller';
 import { HealthModule } from './health/health.controller';
+import { DocsModule } from './docs/docs.controller';
 import { AllExceptionsFilter } from './common/http-exception.filter';
 
 @Global()
@@ -43,6 +44,7 @@ class CoreModule {}
     DataModule,
     InfraModule,
     HealthModule,
+    DocsModule,
   ],
   providers: [
     // Order matters: throttle -> authenticate -> role check -> project membership check. Default-deny at each step.

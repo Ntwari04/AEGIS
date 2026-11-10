@@ -20,7 +20,7 @@ Defaults match the local stack (`https://localtest.me`, self-signed certificate)
 | 7 | Developer isolation | a developer sees no projects, cannot open another project by URL, and `authz.project_denied` is in the audit log |
 | 8 | Auditor | sees the project, databases and servers; is offered no deploy, secret, environment, database, container or cordon control |
 
-Steps 7 to 12 go beyond the eight, covering the screens added after Phase 5:
+Steps 7 to 13 go beyond the eight, covering the screens added after Phase 5:
 
 | # | Step | What the test checks |
 |---|---|---|
@@ -29,7 +29,8 @@ Steps 7 to 12 go beyond the eight, covering the screens added after Phase 5:
 | 9 | Audit log | search by action, every row matches; the CSV export honours the filter; the export is recorded as `audit.export` |
 | 10 | Sign-out | signing out ends the Keycloak session too: signing in again shows the login form, not a silent sign-in |
 | 11 | Sign-ins and role changes | a sign-in appears in the audit log (Keycloak, Promtail, Loki, API); an administrator adds a role and the person's navigation changes within about a minute; the change and the refused old token are in the audit log |
-| 12 | CI key | a key is shown once and only its prefix afterwards; it triggers a deployment of its own project; after revoking it, the same call returns `401` |
+| 12 | API reference | `/api/docs` lists the operations with the roles the guard checks and the validation rules; the downloaded `openapi.json` is a valid document; signed out, both lead to the sign-in page |
+| 13 | CI key | a key is shown once and only its prefix afterwards; it triggers a deployment of its own project; after revoking it, the same call returns `401` |
 
 ## Things to know
 
@@ -39,4 +40,5 @@ Steps 7 to 12 go beyond the eight, covering the screens added after Phase 5:
   and one provisioned database that it does not remove: there is no project deletion in the product yet. `node e2e/scripts/cleanup.mjs` lists them (and only them: slugs
   starting `e2e-`), `--yes` removes them. It leaves the encrypted archives of those test databases in the bucket (`aegisops/db/`); delete that folder when you like.
 - The test needs Docker access on the machine that runs it (`docker exec` for Keycloak users and a read-only audit-log query).
+- `npm run measure` (in `e2e/`) runs the separate measurement spec behind [measurements.md](measurements.md): page loads, API latency, how long a stopped container takes to be noticed, merge-to-live time and the platform's memory. It deploys a test project, so clean up with `npm run cleanup` afterwards.
 - It is not part of CI: it needs the full stack, GHCR images and a public DNS name.

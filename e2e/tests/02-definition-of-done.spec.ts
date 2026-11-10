@@ -301,7 +301,37 @@ test.describe.serial('definition of done', () => {
     }
   });
 
-  test('12. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
+  test('12. the API reference is generated from the running API, and only for signed-in people', async ({ browser }) => {
+    test.setTimeout(120_000);
+    await page.goto('/api/docs');
+    await expect(page.getByTestId('api-count')).toContainText(/\d+ operations/);
+    const op = page.getByTestId('api-op-get-/audit-log');
+    await expect(op).toBeVisible();
+    await expect(op).toContainText('platform_admin');
+    await expect(op).toContainText('auditor');
+    await expect(op).not.toContainText('developer'); // the roles shown are the roles the guard checks
+    await op.locator('summary').click();
+    await expect(op).toContainText('one of SUCCESS, DENIED, ERROR'); // validation rules come from the same DTOs the API enforces
+    await expect(page.getByTestId('api-op-post-/ci/deployments')).toContainText('no user token');
+
+    const [download] = await Promise.all([page.waitForEvent('download'), page.getByTestId('openapi-download').click()]);
+    const doc = JSON.parse(readFileSync((await download.path())!, 'utf8'));
+    expect(doc.openapi).toBe('3.0.3');
+    expect(Object.keys(doc.paths)).toEqual(expect.arrayContaining(['/projects', '/audit-log', '/projects/{projectId}/environments']));
+
+    // Signed out, neither the page nor the file is reachable: both lead to the sign-in page.
+    const anon = await freshPage(browser);
+    try {
+      await anon.goto('/api/docs');
+      await anon.waitForURL(/\/login/);
+      await anon.goto('/api/docs/openapi.json');
+      await anon.waitForURL(/\/login/);
+    } finally {
+      await anon.context().close();
+    }
+  });
+
+  test('13. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
     test.setTimeout(150_000);
     await page.goto(`/projects/${state.projectId}`);
     await page.locator('#key-name').fill('e2e-ci');

@@ -21,6 +21,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
                 {roles.some((r) => ['platform_admin', 'devops_engineer', 'auditor'].includes(r)) && <Link href="/infra">Infrastructure</Link>}
                 {roles.some((r) => ['platform_admin', 'auditor'].includes(r)) && <Link href="/backups">Backups</Link>}
                 {roles.some((r) => ['platform_admin', 'auditor'].includes(r)) && <Link href="/audit">Audit log</Link>}
+                <Link href="/api/docs">API</Link>
               </nav>
               <div className="who">
                 <span data-testid="whoami">{session.user.name ?? session.user.email}</span>
