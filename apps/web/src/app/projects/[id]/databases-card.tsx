@@ -7,15 +7,18 @@ import type { EnvironmentDto, Role } from '@aegisops/shared-types';
 
 type Db = { id: string; name: string; environmentId: string | null; status: 'PROVISIONING' | 'READY' | 'FAILED' | string; error: string | null; createdAt: string };
 
-const STATUS_COLOR: Record<string, string> = { READY: 'SUCCESS', PROVISIONING: 'RUNNING', FAILED: 'FAILED' };
+const STATUS_COLOR: Record<string, string> = { READY: 'SUCCESS', PROVISIONING: 'RUNNING', DECOMMISSIONING: 'RUNNING', FAILED: 'FAILED' };
+/** What the person reads. A removed database keeps its row (its backups stay restorable), so it is shown as history, not hidden. */
+const STATUS_LABEL: Record<string, string> = { DECOMMISSIONING: 'REMOVING', DECOMMISSIONED: 'REMOVED' };
+const shownName = (n: string) => n.replace(/~removed-[0-9a-f]+$/, '');
 
 /** Databases of a project (FR-DB-1). Provisioning is queued; the page refreshes itself while one is being created. */
 export async function DatabasesCard({ projectId, environments, roles }: { projectId: string; environments: EnvironmentDto[]; roles: Role[] }) {
   const dbs = await api<Db[]>(`/projects/${encodeURIComponent(projectId)}/databases`).catch(() => [] as Db[]);
   const isPrivileged = roles.includes('platform_admin') || roles.includes('devops_engineer');
   const canSeeBackups = isPrivileged || roles.includes('auditor');
-  const busy = dbs.some((d) => d.status === 'PROVISIONING');
-  const free = environments.filter((e) => !dbs.some((d) => d.environmentId === e.id && d.status !== 'FAILED'));
+  const busy = dbs.some((d) => d.status === 'PROVISIONING' || d.status === 'DECOMMISSIONING');
+  const free = environments.filter((e) => !dbs.some((d) => d.environmentId === e.id && d.status !== 'FAILED' && d.status !== 'DECOMMISSIONED'));
 
   async function provision(formData: FormData) {
     'use server';
@@ -45,13 +48,17 @@ export async function DatabasesCard({ projectId, environments, roles }: { projec
           <tbody>
             {dbs.map((d) => (
               <tr key={d.id} data-testid={`db-${d.name}`}>
-                <td className="mono" data-label="Name">{d.name}</td>
+                <td className="mono" data-label="Name">{shownName(d.name)}</td>
                 <td data-label="Environment">{environments.find((e) => e.id === d.environmentId)?.name ?? '—'}</td>
                 <td data-label="Status">
-                  <span className="status" data-status={STATUS_COLOR[d.status] ?? 'PENDING'}>{d.status}</span>
+                  <span className="status" data-status={STATUS_COLOR[d.status] ?? 'NONE'}>{STATUS_LABEL[d.status] ?? d.status}</span>
                   {d.error && <div className="error mono">{d.error}</div>}
                 </td>
-                <td>{d.status === 'READY' && canSeeBackups && <Link href={`/projects/${projectId}/databases/${d.id}`}>Backups</Link>}</td>
+                <td>
+                  {(d.status === 'READY' || d.status === 'DECOMMISSIONED' || d.status === 'DECOMMISSIONING' || d.status === 'FAILED') && canSeeBackups && (
+                    <Link href={`/projects/${projectId}/databases/${d.id}`}>{d.status === 'DECOMMISSIONED' ? 'Backups (database removed)' : d.status === 'READY' ? 'Backups' : 'Open'}</Link>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>

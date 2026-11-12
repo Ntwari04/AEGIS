@@ -39,6 +39,8 @@ export interface BackupConfig {
   retention?: RetentionPolicy;
   /** How long a MANUAL backup is kept before it expires (default 30 days). */
   manualRetentionDays?: number;
+  /** After a database is removed, its backups are kept this long (default 90 days) and then ALL expire, including the last one. */
+  decommissionRetentionDays?: number;
 }
 
 export interface AuditLike {
@@ -83,7 +85,8 @@ export class BackupService {
 
   /** Every target that gets a nightly backup (FR-BACKUP-1): the two system databases and every provisioned database. */
   async allTargets(): Promise<Target[]> {
-    const dbs = await this.prisma.database.findMany({ select: { id: true }, orderBy: { createdAt: 'asc' } });
+    // A database being removed, or removed already, no longer exists to back up (its last backup was taken by the removal itself).
+    const dbs = await this.prisma.database.findMany({ where: { status: { notIn: ['DECOMMISSIONING', 'DECOMMISSIONED'] } }, select: { id: true }, orderBy: { createdAt: 'asc' } });
     return [{ kind: 'system', name: 'aegisops' }, { kind: 'system', name: 'keycloak' }, ...dbs.map((d) => ({ kind: 'db' as const, id: d.id }))];
   }
 
@@ -197,9 +200,11 @@ export class BackupService {
     let created = false;
     // Restoring a provisioned database: create it OWNED BY that database's own role and apply the dump as that role, so the
     // application can actually use the restored copy. Drills and system targets use the backup role (nothing needs to log in to them).
-    const owner = backup.databaseId && kind !== 'DRILL' && this.cfg.provisioner
+    // A database that was removed has no role any more: its backup restores under the backup role instead (data intact, no application login).
+    const ownerRow = backup.databaseId && kind !== 'DRILL' && this.cfg.provisioner
       ? await this.prisma.database.findUnique({ where: { id: backup.databaseId } })
       : null;
+    const owner = ownerRow && ownerRow.status !== 'DECOMMISSIONED' ? ownerRow : null;
     const adminConn: PgConn = owner
       ? { host: this.cfg.host, port: this.cfg.port, user: this.cfg.provisioner!.user, password: this.cfg.provisioner!.password, database: 'postgres' }
       : this.conn('postgres');
@@ -319,7 +324,16 @@ export class BackupService {
       await this.prisma.backupJob.update({ where: { id: row.id }, data: { deletedAt: this.now() } });
       deleted++;
     };
-    const targets = (await this.prisma.backupJob.findMany({ distinct: ['target'], select: { target: true } })).map((r) => r.target);
+    // A removed database's backups outlive the removal by a fixed period (a way back from a mistake), then ALL of them expire,
+    // the newest included: removing data has to end somewhere.
+    const goneMs = (this.cfg.decommissionRetentionDays ?? 90) * 86_400_000;
+    const gone = await this.prisma.database.findMany({ where: { status: 'DECOMMISSIONED', decommissionedAt: { lt: new Date(this.now().getTime() - goneMs) } }, select: { id: true } });
+    const goneTargets = new Set<string>();
+    for (const g of gone) {
+      goneTargets.add(`db:${g.id}`);
+      for (const r of await this.prisma.backupJob.findMany({ where: { databaseId: g.id, status: 'SUCCESS', deletedAt: null }, select: { id: true, objectKey: true } })) await expire(r);
+    }
+    const targets = (await this.prisma.backupJob.findMany({ distinct: ['target'], select: { target: true } })).map((r) => r.target).filter((t) => !goneTargets.has(t));
     for (const target of targets) {
       const rows = await this.prisma.backupJob.findMany({ where: { target, status: 'SUCCESS', deletedAt: null }, select: { id: true, kind: true, startedAt: true, objectKey: true } });
       const scheduled = rows.filter((r) => r.kind === 'SCHEDULED');

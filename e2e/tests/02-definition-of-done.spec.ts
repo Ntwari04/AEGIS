@@ -533,4 +533,77 @@ test.describe.serial('definition of done', () => {
     await expect(page.getByTestId('api-key-e2e-ci')).toContainText('revoked');
     expect((await call()).status()).toBe(401);
   });
+
+  test('18. the application role\'s password is rotated from the dashboard, with a reason, and the rotation is audited', async () => {
+    test.setTimeout(240_000);
+    await page.goto(`/projects/${state.projectId}`);
+    await page.getByTestId('db-e2edb').getByRole('link', { name: 'Backups' }).click();
+    await expect(page.getByTestId('rotation-status')).toContainText('Never rotated');
+
+    await page.getByTestId('rotate-reason').fill('end-to-end rotation check');
+    await page.getByTestId('rotate-db').click();
+    await expect(page.getByTestId('page-ok')).toContainText('Redeploy the environment');
+    // the worker does it in the background; the page refreshes itself
+    await expect(page.getByTestId('rotation-status')).toContainText('Last rotated', { timeout: 120_000 });
+    await expect(page.getByTestId('rotation-error')).toHaveCount(0);
+    expect(psql(`select "passwordRotatedAt" is not null from "Database" where "projectId"='${state.projectId}' and name='e2edb'`)).toBe('t');
+    // the new connection string is stored (encrypted); its value is never shown anywhere
+    expect(psql(`select count(*) from "EnvironmentSecret" s join "Environment" e on e.id=s."environmentId" where e."projectId"='${state.projectId}' and s.name='DATABASE_URL'`)).toBe('1');
+    await expect(page.locator('main')).not.toContainText(/postgresql:\/\//);
+
+    await page.goto('/audit?action=database.rotate_password*');
+    await expect(page.locator('main')).toContainText('database.rotate_password.request');
+    await expect(page.locator('main')).toContainText('database.rotate_password');
+    await expect(page.locator('main')).not.toContainText(/password":|postgresql:/i);
+  });
+
+  test('19. a database is removed after a final backup, its data and role are gone, and the final backup still restores into a new database', async () => {
+    test.setTimeout(420_000);
+    const pgName = psql(`select "pgName" from "Database" where "projectId"='${state.projectId}' and name='e2edb'`);
+    const roleName = `${pgName}_u`;
+    const exists = (sql: string) => psql(sql, 'postgres') === '1';
+    expect(exists(`select 1 from pg_database where datname='${pgName}'`)).toBe(true);
+
+    await page.goto(`/projects/${state.projectId}`);
+    await page.getByTestId('db-e2edb').getByRole('link', { name: 'Backups' }).click();
+
+    // the name must be typed back, and a wrong one is refused with nothing queued
+    await page.getByTestId('remove-confirm').fill('not-the-name');
+    await page.getByTestId('remove-reason').fill('the end-to-end run is over');
+    await page.getByTestId('remove-db').click();
+    await expect(page.getByTestId('page-error')).toContainText(/does not match/i);
+    expect(exists(`select 1 from pg_database where datname='${pgName}'`)).toBe(true);
+
+    await page.getByTestId('remove-confirm').fill('e2edb');
+    await page.getByTestId('remove-reason').fill('the end-to-end run is over');
+    await page.getByTestId('remove-db').click();
+    await expect(page.getByTestId('page-ok')).toContainText('Removal queued');
+    await expect(page.getByTestId('db-removed')).toBeVisible({ timeout: 300_000 });
+
+    // really gone: database, role and connection string
+    expect(exists(`select 1 from pg_database where datname='${pgName}'`)).toBe(false);
+    expect(exists(`select 1 from pg_roles where rolname='${roleName}'`)).toBe(false);
+    expect(psql(`select count(*) from "EnvironmentSecret" s join "Environment" e on e.id=s."environmentId" where e."projectId"='${state.projectId}' and s.name='DATABASE_URL'`)).toBe('0');
+    await expect(page.getByTestId('remove-database')).toHaveCount(0);
+    await expect(page.getByTestId('backup-now')).toHaveCount(0);
+
+    // the final backup is the newest SUCCESS row and still restores into a NEW database, with every row
+    const finalBackup = page.getByTestId('backup-history').locator('tbody tr').first();
+    await expect(finalBackup.locator('.status')).toHaveText('SUCCESS');
+    await finalBackup.locator('summary', { hasText: 'Restore' }).click();
+    await finalBackup.getByTestId('restore-new').click();
+    const restore = page.getByTestId('restore-history').locator('tbody tr').first();
+    await expect(restore.locator('.status')).toHaveText('SUCCESS', { timeout: 200_000 });
+    await expect(restore).toContainText('verified: 1 tables, 3 rows');
+
+    // the project can provision a new database in that environment again, and the audit log has the request and the result
+    await page.goto(`/projects/${state.projectId}`);
+    await page.getByTestId('databases-card').locator('summary', { hasText: 'Provision a database' }).click();
+    await expect(page.getByTestId('provision-db')).toBeVisible();
+    await expect(page.locator('#db-env').locator('option', { hasText: 'staging' })).toHaveCount(1); // the environment is free again
+    await expect(page.getByTestId('databases-card')).toContainText('REMOVED');
+    await page.goto('/audit?action=database.deprovision*');
+    await expect(page.locator('main')).toContainText('database.deprovision.request');
+    await expect(page.locator('main')).toContainText('database.deprovision');
+  });
 });

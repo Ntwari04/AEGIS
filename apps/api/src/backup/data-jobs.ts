@@ -8,6 +8,8 @@ export type DataJob =
   | { name: 'backup'; data: { target: string; requestedById: string } }
   | { name: 'restore'; data: { backupJobId: string; requestedById: string; reason?: string } }
   | { name: 'provision-db'; data: { databaseId: string; requestedById: string } }
+  | { name: 'rotate-password'; data: { databaseId: string; requestedById: string; reason: string } }
+  | { name: 'deprovision-db'; data: { databaseId: string; requestedById: string; reason: string } }
   | { name: 'overwrite'; data: { backupJobId: string; requestedById: string; reason: string } }
   | { name: 'drill'; data: Record<string, never> };
 

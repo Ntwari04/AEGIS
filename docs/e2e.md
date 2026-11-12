@@ -36,6 +36,11 @@ Steps 7 to 17 go beyond the eight, covering the screens added after Phase 5:
 | 16 | Updates in place | during a deployment that takes a minute the history changes by itself, the page is never reloaded, and text typed into another form and a fold opened by hand are still there afterwards; no `meta refresh` remains |
 | 17 | CI key | a key is shown once and only its prefix afterwards; it triggers a deployment of its own project; after revoking it, the same call returns `401` |
 
+Steps 18 and 19 (database password rotation and removal) follow step 17 in the same file:
+
+| 18 | Password rotation | a platform admin rotates the application role's password from the database's page with a reason: the page says so, shows when it was last rotated, no connection string appears anywhere, a `DATABASE_URL` secret is still stored, and both audit entries exist without any password |
+| 19 | Database removal | the name must be typed back (a wrong one is refused, nothing dropped); a platform admin removes the database from step 6: it shows REMOVING then REMOVED, the Postgres database and role are gone, the `DATABASE_URL` secret is deleted, backups are no longer offered, its final backup restores into a NEW database with the same `1 tables, 3 rows`, the environment can be provisioned again, and both audit entries exist |
+
 `tests/04-users-and-roles.spec.ts` covers the Platform Admin persona (the person it creates is named `e2e-person-…`, removed afterwards and found by `npm run cleanup` if a run dies):
 
 | Test | What it proves |

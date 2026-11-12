@@ -57,6 +57,36 @@ Dashboard (`platform_admin`): Restore… → *Overwrite the live database*: type
 To get the old data back: `ALTER DATABASE <name>_old_<time> WITH ALLOW_CONNECTIONS true;` and connect, or run another overwrite from the safety backup.
 Drop `<name>_old_<time>` yourself when you are sure (`DROP DATABASE`); AegisOps never deletes it.
 
+### Rotate a database's password
+
+Dashboard (`platform_admin`, or the project's `devops_engineer`): project → Databases → open it → *Rotate the application's database password*, with a reason (at least 10 characters). The data worker:
+1. reads the current password from the environment's `DATABASE_URL`, which must still point at this database (if someone replaced it with another address there is nowhere to deliver a new
+   password, so nothing is changed and the page says why);
+2. gives the role a new random password and **proves a login with it**;
+3. only then replaces `DATABASE_URL`. If that fails, the **old password is put back**, so the application is never left with a secret that does not work.
+
+Postgres cannot hold two passwords, and it does not drop connections when a password changes. So the application **keeps the connections it already has but must be redeployed**
+before it next connects; until then a new connection with the old password fails. Rotate, then redeploy the environment straight away. The page shows when the last rotation happened and,
+after a failed attempt, why it failed (the application is unaffected). Nothing shows the password: not the page, the audit log (`database.rotate_password.request` and
+`database.rotate_password`, with the reason) or an error.
+
+### Remove a database (deprovisioning)
+
+Dashboard (`platform_admin` only): project → Databases → open it → *Remove this database*: type the database name and a reason (at least 10 characters). The database is marked
+**REMOVING** at once (no more backups or overwrites of it), then the data worker, automatically:
+1. takes a **final backup**. If it fails, **nothing is dropped**: the database goes back to READY with the reason shown, and you can try again;
+2. refuses new connections, ends the existing ones, then drops the database and its PostgreSQL role. **Copies the role owns are dropped too** (databases you restored a backup into,
+   and the `<name>_old_<time>` copies an overwrite leaves), because Postgres will not drop a role that still owns a database; their names are recorded in the audit log (`droppedCopies`).
+   Their data is covered by the final backup of the live database and the older backups, for the retention period below;
+3. deletes the environment's `DATABASE_URL` secret, **only if it still points at this database** (someone may have replaced it with another database's address);
+4. marks the row **REMOVED**. The row stays as history, its label is freed so the project can provision a database of the same name, and its backups stay listed.
+
+What the application sees: it loses its database at once. Redeploy it without a database, or provision a new one (the environment is free again).
+What is kept: every backup of the removed database, including the final one, stays restorable into a **new** database (the application role no longer exists, so the copy
+belongs to the backup role and a platform admin reaches it; nothing logs in to it) for **90 days** after the removal (`DECOMMISSION_RETENTION_DAYS`). Then **all** of its backups expire,
+the newest included: removal has to end somewhere. If the worker restarts in the middle, the database shows FAILED with a message; running the removal again completes it (every step can be repeated).
+Provisioning a database that **failed** to be created can be removed the same way.
+
 ### Disaster recovery: the server is gone
 
 You need: the object-storage bucket and its credentials, and **`BACKUP_ENCRYPTION_KEY`** (kept off the server). Without the key the backups cannot be read by anyone.
@@ -110,6 +140,8 @@ kept **30 days** and are never displaced by a nightly one. Pruning deletes the a
 | Backup history | no | yes | yes | yes |
 | On-demand backup, restore to a new DB | no | no | yes | yes |
 | **Overwrite** a live database | no | no | **no** | **yes** (typed name + reason) |
+| Rotate a database's password | no | no | yes | yes (reason) |
+| **Remove** a database (final backup, then drop) | no | no | **no** | **yes** (typed name + reason) |
 | System DB backups, drills, restore history | no | read | no | yes |
 | Container start/stop/restart (non-production) | yes | no | yes | yes |
 | Container controls (production) | no | no | yes | yes |
@@ -135,8 +167,8 @@ server, a foreign container and "stop redis" were all refused and audited. The i
 
 ## Known gaps
 
-- Deprovisioning (dropping a provisioned database and its role) is deliberately not offered from the dashboard; do it by hand once you are sure.
-- Rotating a provisioned role's password is not offered yet (re-provision into a new database, or `ALTER ROLE` by hand and update `DATABASE_URL`).
+- Removing a database is irreversible once its backups expire (90 days). Volumes and other data the application keeps outside this database are not touched.
+- Rotation does not redeploy the application for you: between the rotation and the redeploy a new connection from the running container fails. Rotating the password of a role that something other than the platform also uses is not supported (the platform only updates `DATABASE_URL`).
 - Point-in-time recovery (WAL archiving) is not provided; RPO is the backup interval.
 - Backups are encrypted with a symmetric key held on the server (so drills can run unattended). A compromise of the server exposes that key. Public-key encryption
   (server holds only the public key) would remove that, at the cost of unattended drills; see `docs/secrets-review.md`.

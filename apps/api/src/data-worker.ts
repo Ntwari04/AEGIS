@@ -59,6 +59,7 @@ async function main() {
       rtoSeconds: Number(process.env.BACKUP_RTO_SECONDS ?? 4 * 3600),
       keyPrefix: process.env.S3_PREFIX ?? 'aegisops/',
       provisioner: { user: process.env.PROVISIONER_DB_USER ?? 'aegis_provisioner', password: need('PROVISIONER_DB_PASSWORD') },
+      decommissionRetentionDays: Number(process.env.DECOMMISSION_RETENTION_DAYS ?? 90),
     },
     auditTo(prisma),
   );
@@ -73,6 +74,8 @@ async function main() {
   await prisma.backupJob.updateMany({ where: { status: 'RUNNING' }, data: { status: 'FAILED', error: 'data worker restarted mid-backup', finishedAt: new Date() } });
   await prisma.restoreJob.updateMany({ where: { status: 'RUNNING' }, data: { status: 'FAILED', error: 'data worker restarted mid-restore', finishedAt: new Date() } });
   await prisma.database.updateMany({ where: { status: 'PROVISIONING' }, data: { status: 'FAILED', error: 'data worker restarted while provisioning' } });
+  // A removal interrupted midway is safe to run again (every step is idempotent), but only once someone asks for it again.
+  await prisma.database.updateMany({ where: { status: 'DECOMMISSIONING' }, data: { status: 'FAILED', error: 'data worker restarted while removing the database; run the removal again' } });
   await service.cleanupScratch().catch((e) => console.warn(`scratch cleanup skipped: ${e.message}`));
 
   const u = new URL(need('REDIS_URL'));
@@ -92,6 +95,14 @@ async function main() {
       case 'backup': return void (await service.backup(parseTarget(d.target), { kind: 'MANUAL', triggeredById: d.requestedById }));
       case 'restore': return void (await service.restoreToNew(d.backupJobId, { requestedById: d.requestedById, reason: d.reason }));
       case 'provision-db': return void (await provisioner.provision(d.databaseId, d.requestedById));
+      case 'rotate-password': return void (await provisioner.rotatePassword(d.databaseId, { requestedById: d.requestedById, reason: d.reason }));
+      case 'deprovision-db':
+        return void (await provisioner.deprovision(d.databaseId, {
+          requestedById: d.requestedById,
+          reason: d.reason,
+          // The last backup of the database, taken as the removal's first step; if it fails nothing is dropped.
+          finalBackup: () => service.backup({ kind: 'db', id: d.databaseId }, { kind: 'MANUAL', triggeredById: d.requestedById }),
+        }));
       case 'overwrite': return void (await service.overwrite(d.backupJobId, { requestedById: d.requestedById, reason: d.reason }));
       case 'drill': return void (await service.drill());
       case 'prune': return void (await service.prune());

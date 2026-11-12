@@ -212,10 +212,18 @@ model Database {
   pgName        String   @unique
   roleName      String   @unique
   /// PROVISIONING while the data worker creates the role and database, then READY, or FAILED with the reason in error.
+  /// Removal: DECOMMISSIONING while the worker takes the final backup and drops the database and role, then DECOMMISSIONED
+  /// (the row stays, so its backups can still be found and restored into a new database until they expire).
   status        String   @default("READY")
   error         String?
   createdById   String?
   createdAt     DateTime @default(now())
+  /// When the database and its role were dropped. Its backups expire DECOMMISSION_RETENTION_DAYS after this.
+  decommissionedAt DateTime?
+  /// When the role's password was last rotated from the dashboard.
+  passwordRotatedAt DateTime?
+  /// Why the last rotation attempt failed (the old password was put back, so the application is unaffected); cleared by a success.
+  rotationError String?
 
   project Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
   backups BackupJob[]

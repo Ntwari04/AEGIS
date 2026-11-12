@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, ConflictException, Controller, Get, HttpCode, Inject, Module, NotFoundException, Param, Post, Query, ServiceUnavailableException,
+  BadRequestException, Body, ConflictException, Controller, Get, HttpCode, Inject, Module, NotFoundException, Param, Post, Query, Req, ServiceUnavailableException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { IsString, Length, Matches } from 'class-validator';
@@ -24,6 +24,17 @@ export class RestoreDto {
 
 /** FR-DB-4: the overwrite is a SEPARATE step with its own confirmation: the database's name typed back, and a recorded reason. */
 export class OverwriteDto {
+  @IsString() @Length(1, 100) confirm!: string;
+  @IsString() @Length(10, 500) reason!: string;
+}
+
+/** Rotating the application's database password: a recorded reason (no typed name: no data is touched). */
+export class RotatePasswordDto {
+  @IsString() @Length(10, 500) reason!: string;
+}
+
+/** Removing a database drops its data: the database's name typed back, and a recorded reason (like the overwrite). */
+export class DeprovisionDto {
   @IsString() @Length(1, 100) confirm!: string;
   @IsString() @Length(10, 500) reason!: string;
 }
@@ -73,7 +84,7 @@ export class DataController {
   async list(@Param('projectId') projectId: string) {
     const dbs = await this.prisma.database.findMany({ where: { projectId }, orderBy: { createdAt: 'asc' } });
     // pgName / roleName are internal; the dashboard shows the label, the environment and the status.
-    return dbs.map((d) => ({ id: d.id, name: d.name, environmentId: d.environmentId, status: d.status, error: d.error, createdAt: d.createdAt }));
+    return dbs.map((d) => ({ id: d.id, name: d.name, environmentId: d.environmentId, status: d.status, error: d.error, createdAt: d.createdAt, decommissionedAt: d.decommissionedAt, passwordRotatedAt: d.passwordRotatedAt, rotationError: d.rotationError }));
   }
 
   @Post('projects/:projectId/databases')
@@ -87,7 +98,7 @@ export class DataController {
     const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId } });
     const env = await this.prisma.environment.findFirst({ where: { id: dto.environmentId, projectId } });
     if (!env) throw new NotFoundException('Environment not found');
-    if (await this.prisma.database.findFirst({ where: { environmentId: env.id, status: { not: 'FAILED' } } })) throw new ConflictException('That environment already has a database');
+    if (await this.prisma.database.findFirst({ where: { environmentId: env.id, status: { notIn: ['FAILED', 'DECOMMISSIONED'] } } })) throw new ConflictException('That environment already has a database');
     if ((await this.secrets.list(env.id)).some((s) => s.name === 'DATABASE_URL')) throw new ConflictException('That environment already has a DATABASE_URL secret; remove it first');
 
     for (let attempt = 0; ; attempt++) {
@@ -107,6 +118,48 @@ export class DataController {
         throw e;
       }
     }
+  }
+
+  /**
+   * Rotate the application role's password. The data worker changes it in Postgres, proves a login with it and only then replaces the
+   * environment's DATABASE_URL (putting the old password back if that fails). The application keeps its open connections but must be
+   * redeployed before it next connects. A platform admin or the project's devops engineer, with a recorded reason.
+   */
+  @Post('projects/:projectId/databases/:dbId/rotate-password')
+  @HttpCode(202)
+  @Roles('platform_admin', 'devops_engineer')
+  @ProjectAccess('manage')
+  @Audited({ action: 'database.rotate_password.request', targetType: 'database', targetParam: 'dbId' })
+  async rotatePassword(@Param('projectId') projectId: string, @Param('dbId') dbId: string, @Body() dto: RotatePasswordDto, @CurrentUser() user: AuthUser, @Req() req: any) {
+    const db = await this.database(projectId, dbId);
+    if (db.status !== 'READY') throw new ConflictException('That database is not ready');
+    req.auditMetadata = { database: db.name, reason: dto.reason, environmentId: db.environmentId };
+    await this.queue.enqueue({ name: 'rotate-password', data: { databaseId: db.id, requestedById: user.id, reason: dto.reason } });
+    return { queued: true };
+  }
+
+  /**
+   * Remove a database (deprovisioning): platform admin only, its name typed back, a recorded reason. The data worker takes a final
+   * backup first and drops nothing if that fails. The database is marked DECOMMISSIONING at once, which also stops new backups and
+   * overwrites of it; its backups stay restorable into a NEW database for the retention period.
+   */
+  @Post('projects/:projectId/databases/:dbId/deprovision')
+  @HttpCode(202)
+  @Roles('platform_admin')
+  @ProjectAccess('manage')
+  @Audited({ action: 'database.deprovision.request', targetType: 'database', targetParam: 'dbId' })
+  async deprovision(@Param('projectId') projectId: string, @Param('dbId') dbId: string, @Body() dto: DeprovisionDto, @CurrentUser() user: AuthUser, @Req() req: any) {
+    const db = await this.database(projectId, dbId);
+    if (dto.confirm !== db.name) throw new BadRequestException('The confirmation does not match the database name');
+    if (db.status === 'DECOMMISSIONING') throw new ConflictException('That database is already being removed');
+    if (db.status === 'DECOMMISSIONED') throw new ConflictException('That database was already removed');
+    if (db.status === 'PROVISIONING') throw new ConflictException('That database is still being created');
+    // Claims the database in one step, so two requests cannot both queue a removal.
+    const claimed = await this.prisma.database.updateMany({ where: { id: db.id, status: { in: ['READY', 'FAILED'] } }, data: { status: 'DECOMMISSIONING', error: null } });
+    if (claimed.count === 0) throw new ConflictException('That database changed state; reload and check it');
+    req.auditMetadata = { database: db.name, reason: dto.reason, environmentId: db.environmentId };
+    await this.queue.enqueue({ name: 'deprovision-db', data: { databaseId: db.id, requestedById: user.id, reason: dto.reason } });
+    return { id: db.id, name: db.name, status: 'DECOMMISSIONING' };
   }
 
   // ---- backups (FR-DB-3) -------------------------------------------------------------------------------------------

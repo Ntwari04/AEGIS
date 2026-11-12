@@ -28,6 +28,10 @@ let svc: BackupService;
 let appDbId: string;
 const audit: { action: string; result: string; metadata?: any }[] = [];
 const key = randomBytes(32);
+const svcCfg = {
+  host: 'localhost', port: 5432, user: 'aegis_backup', password: 'bk-pass', provisioner: { user: 'aegis_provisioner', password: 'pv-pass' },
+  systemDatabases: { aegisops: 'sysdb', keycloak: 'kcdb' }, encryptionKey: key, rtoSeconds: 4 * 3600, keyPrefix: 'aegisops/',
+};
 
 // pg_dump / psql run INSIDE the Postgres container (this host has no Postgres client tools): same binaries, same flags.
 const su = (database: string): PgConn => ({ host: 'localhost', port: 5432, user: 'test', password: 'test', database });
@@ -96,10 +100,7 @@ beforeAll(async () => {
   const project = await prisma.project.create({ data: { name: 'BK', slug: 'bk' } });
   appDbId = (await prisma.database.create({ data: { projectId: project.id, name: 'appdata', pgName: 'appdata', roleName: 'appdata_role' } })).id;
 
-  svc = new BackupService(prisma, store, tools, {
-    host: 'localhost', port: 5432, user: 'aegis_backup', password: 'bk-pass', provisioner: { user: 'aegis_provisioner', password: 'pv-pass' },
-    systemDatabases: { aegisops: 'sysdb', keycloak: 'kcdb' }, encryptionKey: key, rtoSeconds: 4 * 3600, keyPrefix: 'aegisops/',
-  }, { record: async (e) => void audit.push({ action: e.action, result: e.result, metadata: e.metadata }) });
+  svc = new BackupService(prisma, store, tools, svcCfg, { record: async (e) => void audit.push({ action: e.action, result: e.result, metadata: e.metadata }) });
 });
 
 afterAll(async () => {
@@ -587,6 +588,316 @@ describe('overwrite restore (FR-DB-4): separate, safe, reversible', () => {
     expect(r.status).toBe('FAILED');
     expect(await count(db.pgName)).toBe(before);
     expect((await sql('postgres', "SELECT count(*) FROM pg_database WHERE datname ~ '^restore_ow_'")).trim()).toBe('0');
+  });
+});
+
+describe('database removal (deprovisioning)', () => {
+  let secrets: SecretsService;
+  let prov: DatabaseProvisioner;
+  let projectId: string;
+  const day = 86_400_000;
+
+  beforeAll(async () => {
+    secrets = SecretsService.withCrypto(prisma as any, new SecretsCrypto(randomBytes(32).toString('base64')));
+    prov = new DatabaseProvisioner(prisma, tools, secrets, { host: 'localhost', port: 5432, user: 'aegis_provisioner', password: 'pv-pass', backupRole: 'aegis_backup' },
+      { record: async (e) => void audit.push({ action: e.action, result: e.result, metadata: e.metadata }) });
+    projectId = (await prisma.project.create({ data: { name: 'Gone', slug: 'gone' } })).id;
+  });
+
+  /** A READY database with a table of rows, in its own environment. */
+  async function provisioned(label: string, rows = 7, envName = label) {
+    const envId = (await prisma.environment.create({ data: { projectId, name: envName } })).id;
+    const names = provisionNames('gone');
+    const row = await prisma.database.create({ data: { projectId, environmentId: envId, name: label, ...names, status: 'PROVISIONING' } });
+    expect((await prov.provision(row.id)).status).toBe('READY');
+    await sql(row.pgName, `CREATE TABLE ledger(id serial primary key, note text); INSERT INTO ledger(note) SELECT 'row ' || g FROM generate_series(1, ${rows}) g`);
+    return { ...row, envId };
+  }
+  const remove = (id: string, finalBackup?: () => Promise<{ status: string; error?: string | null; id?: string }>) =>
+    prov.deprovision(id, { requestedById: 'admin-1', reason: 'the project was retired', finalBackup: finalBackup ?? (() => svc.backup({ kind: 'db', id }, { kind: 'MANUAL', triggeredById: 'admin-1' })) });
+  const claim = (id: string) => prisma.database.update({ where: { id }, data: { status: 'DECOMMISSIONING' } });
+  const roleExists = async (name: string) => (await sql('postgres', `SELECT count(*) FROM pg_roles WHERE rolname='${name}'`)).trim() === '1';
+  const hasUrl = async (envId: string) => (await secrets.forEnvironment(envId)).some((s) => s.startsWith('DATABASE_URL='));
+
+  it('takes a final backup, drops the database and its role, deletes the connection string and keeps the row as history', async () => {
+    const d = await provisioned('first');
+    await claim(d.id);
+    const done = await remove(d.id);
+    expect(done.status).toBe('DECOMMISSIONED');
+    expect(done.decommissionedAt).not.toBeNull();
+    expect(done.name).toMatch(/^first~removed-[0-9a-f]{6}$/); // the label is free for a new database
+    expect(await dbExists(d.pgName)).toBe(false);
+    expect(await roleExists(d.roleName)).toBe(false);
+    expect(await hasUrl(d.envId)).toBe(false);
+
+    const final = await prisma.backupJob.findFirstOrThrow({ where: { databaseId: d.id }, orderBy: { startedAt: 'desc' } });
+    expect(final).toMatchObject({ status: 'SUCCESS', kind: 'MANUAL', triggeredById: 'admin-1' });
+    expect((final.manifest as any)['public.ledger']).toBe(7);
+    const entry = audit.filter((a) => a.action === 'database.deprovision').pop()!;
+    expect(entry).toMatchObject({ result: 'SUCCESS', metadata: { reason: 'the project was retired', finalBackupId: final.id, secretRemoved: true } });
+  });
+
+  it('the final backup of a removed database restores into a NEW database with every row, even though its role is gone', async () => {
+    const gone = await prisma.database.findFirstOrThrow({ where: { projectId, status: 'DECOMMISSIONED' } });
+    const final = await prisma.backupJob.findFirstOrThrow({ where: { databaseId: gone.id, status: 'SUCCESS' }, orderBy: { startedAt: 'desc' } });
+    const r = await svc.restoreToNew(final.id, { requestedById: 'admin-1', reason: 'recover a removed database' });
+    expect(r.status).toBe('SUCCESS');
+    expect((await sql(r.targetDatabase, 'SELECT count(*) FROM ledger')).trim()).toBe('7');
+    await sql('postgres', `DROP DATABASE ${r.targetDatabase}`);
+  });
+
+  it('REFUSES to drop anything when the final backup fails: the database, its role and its connection string stay, and it is READY again', async () => {
+    const d = await provisioned('safe');
+    await claim(d.id);
+    await sql('postgres', `REVOKE CONNECT ON DATABASE ${d.pgName} FROM aegis_backup`); // the backup will now fail
+    try {
+      const r = await remove(d.id);
+      expect(r.status).toBe('READY');
+      expect(r.error).toMatch(/refused: the final backup failed/);
+    } finally {
+      await sql('postgres', `GRANT CONNECT ON DATABASE ${d.pgName} TO aegis_backup`);
+    }
+    expect(await dbExists(d.pgName)).toBe(true);
+    expect(await roleExists(d.roleName)).toBe(true);
+    expect(await hasUrl(d.envId)).toBe(true);
+    expect((await sql(d.pgName, 'SELECT count(*) FROM ledger')).trim()).toBe('7');
+    expect(audit.filter((a) => a.action === 'database.deprovision').pop()).toMatchObject({ result: 'ERROR' });
+
+    // and the next attempt, with the backup working again, goes through
+    await claim(d.id);
+    expect((await remove(d.id)).status).toBe('DECOMMISSIONED');
+    expect(await dbExists(d.pgName)).toBe(false);
+  });
+
+  it('a backup function that throws is the same as one that fails: nothing is dropped', async () => {
+    const d = await provisioned('throws');
+    await claim(d.id);
+    const r = await remove(d.id, async () => { throw new Error('object storage is unreachable'); });
+    expect(r.status).toBe('READY');
+    expect(r.error).toMatch(/object storage is unreachable/);
+    expect(await dbExists(d.pgName)).toBe(true);
+    await claim(d.id);
+    await remove(d.id); // leave nothing behind
+  });
+
+  it('leaves a DATABASE_URL alone if it no longer points at this database', async () => {
+    const d = await provisioned('replaced');
+    await secrets.set(d.envId, 'DATABASE_URL', 'postgresql://someone:else@elsewhere.example:5432/theirs');
+    await claim(d.id);
+    const done = await remove(d.id);
+    expect(done.status).toBe('DECOMMISSIONED');
+    expect(await hasUrl(d.envId)).toBe(true);
+    expect(audit.filter((a) => a.action === 'database.deprovision').pop()?.metadata?.secretRemoved).toBe(false);
+  });
+
+  it('can be run again after an interruption: a database already dropped is not backed up again, and the rest still completes', async () => {
+    const d = await provisioned('interrupted');
+    await sql('postgres', `DROP DATABASE ${d.pgName}`); // as if the worker died after the drop but before the role and the record
+    await prisma.database.update({ where: { id: d.id }, data: { status: 'FAILED', error: 'data worker restarted while removing the database; run the removal again' } });
+    await claim(d.id);
+    let backupCalled = false;
+    const done = await remove(d.id, async () => { backupCalled = true; return { status: 'SUCCESS' }; });
+    expect(backupCalled).toBe(false);
+    expect(done.status).toBe('DECOMMISSIONED');
+    expect(await roleExists(d.roleName)).toBe(false);
+  });
+
+  it('also drops the copies its role owns (a restore into a new database, the _old_ copy an overwrite leaves), because Postgres would not let the role go otherwise, and audits them', async () => {
+    const d = await provisioned('copies');
+    const b = await svc.backup({ kind: 'db', id: d.id });
+    const restored = await svc.restoreToNew(b.id, { requestedById: 'admin-1' }); // owned by the application role
+    const over = await svc.overwrite(b.id, { requestedById: 'admin-1', reason: 'leave an old copy behind' });
+    const oldCopy = (over.integrity as any).previousDatabase as string;
+    expect(await dbExists(restored.targetDatabase)).toBe(true);
+    expect(await dbExists(oldCopy)).toBe(true);
+
+    await claim(d.id);
+    const done = await remove(d.id);
+    expect(done.status).toBe('DECOMMISSIONED');
+    for (const name of [d.pgName, restored.targetDatabase, oldCopy]) expect(await dbExists(name)).toBe(false);
+    expect(await roleExists(d.roleName)).toBe(false);
+    const dropped = audit.filter((a) => a.action === 'database.deprovision').pop()!.metadata.droppedCopies as string[];
+    expect(dropped).toEqual(expect.arrayContaining([restored.targetDatabase, oldCopy]));
+  });
+
+  it('only touches databases its own role owns: a stranger\'s database and another provisioned database survive', async () => {
+    const a = await provisioned('keep-a');
+    const b = await provisioned('keep-b');
+    await sql('postgres', 'CREATE DATABASE bystander');
+    await claim(a.id);
+    await remove(a.id);
+    expect(await dbExists('bystander')).toBe(true);
+    expect(await dbExists(b.pgName)).toBe(true);
+    expect(await roleExists(b.roleName)).toBe(true);
+    expect((await sql(b.pgName, 'SELECT count(*) FROM ledger')).trim()).toBe('7');
+    await sql('postgres', 'DROP DATABASE bystander');
+    await claim(b.id);
+    await remove(b.id);
+  });
+
+  it('does nothing to a database that was not claimed for removal', async () => {
+    const d = await provisioned('untouched');
+    const r = await remove(d.id, async () => { throw new Error('must not be called'); });
+    expect(r.status).toBe('READY');
+    expect(await dbExists(d.pgName)).toBe(true);
+    await claim(d.id);
+    await remove(d.id);
+  });
+
+  it('a project can provision a new database under the name of a removed one', async () => {
+    const d = await provisioned('reuse');
+    await claim(d.id);
+    await remove(d.id);
+    const again = await provisioned('reuse', 7, 'reuse-again'); // the same database label, in another environment
+    expect((await prisma.database.findUniqueOrThrow({ where: { id: again.id } })).status).toBe('READY');
+    await claim(again.id);
+    await remove(again.id);
+  });
+
+  it('nightly backups and drills skip a database that is being or has been removed', async () => {
+    const targets = (await svc.allTargets()).filter((t) => t.kind === 'db').map((t) => (t as { id: string }).id);
+    const removed = await prisma.database.findMany({ where: { projectId, status: { in: ['DECOMMISSIONED', 'DECOMMISSIONING'] } }, select: { id: true } });
+    expect(removed.length).toBeGreaterThan(3);
+    for (const r of removed) expect(targets).not.toContain(r.id);
+  });
+
+  it('backups of a removed database are kept for the retention period, then ALL of them expire (the newest too), while other databases are untouched', async () => {
+    const d = await provisioned('expiring');
+    await claim(d.id);
+    await remove(d.id);
+    const live = await provisioned('still-live');
+    const liveBackup = await svc.backup({ kind: 'db', id: live.id });
+    const mine = await prisma.backupJob.findMany({ where: { databaseId: d.id, status: 'SUCCESS', deletedAt: null } });
+    expect(mine.length).toBeGreaterThan(0);
+
+    // inside the retention window: nothing of it expires
+    const early = new BackupService(prisma, store, tools, svcCfg, undefined, () => new Date(Date.now() + 30 * day));
+    await early.prune();
+    expect(await prisma.backupJob.count({ where: { databaseId: d.id, status: 'SUCCESS', deletedAt: null } })).toBe(mine.length);
+
+    // after it: every backup of the removed database is gone, from the rows and from storage
+    const late = new BackupService(prisma, store, tools, svcCfg, undefined, () => new Date(Date.now() + 100 * day));
+    await late.prune();
+    expect(await prisma.backupJob.count({ where: { databaseId: d.id, status: 'SUCCESS', deletedAt: null } })).toBe(0);
+    for (const m of mine) expect(await store.size(m.objectKey!)).toBeNull();
+    // a live database keeps its newest backup however old the clock says it is
+    expect((await prisma.backupJob.findUniqueOrThrow({ where: { id: liveBackup.id } })).deletedAt).toBeNull();
+    await claim(live.id);
+    await remove(live.id);
+  });
+});
+
+describe('password rotation of a provisioned role', () => {
+  let secrets: SecretsService;
+  let prov: DatabaseProvisioner;
+  let projectId: string;
+  // Over loopback this Postgres image trusts everyone without checking a password, so a rotation could not be seen to work. Connecting
+  // through the container's own address (its hostname) goes through password authentication, as it does in production.
+  const cfg = { get host() { return pg.getId().slice(0, 12); }, port: 5432, user: 'aegis_provisioner', password: 'pv-pass', backupRole: 'aegis_backup', appHost: 'postgres' };
+
+  beforeAll(async () => {
+    secrets = SecretsService.withCrypto(prisma as any, new SecretsCrypto(randomBytes(32).toString('base64')));
+    prov = new DatabaseProvisioner(prisma, tools, secrets, cfg, { record: async (e) => void audit.push({ action: e.action, result: e.result, metadata: e.metadata }) });
+    projectId = (await prisma.project.create({ data: { name: 'Rotate', slug: 'rotate' } })).id;
+  });
+
+  async function provisioned(label: string) {
+    const envId = (await prisma.environment.create({ data: { projectId, name: label } })).id;
+    const names = provisionNames('rotate');
+    const row = await prisma.database.create({ data: { projectId, environmentId: envId, name: label, ...names, status: 'PROVISIONING' } });
+    expect((await prov.provision(row.id)).status).toBe('READY');
+    await sql(row.pgName, `CREATE TABLE ledger(id int); INSERT INTO ledger VALUES (1),(2),(3); ALTER TABLE ledger OWNER TO ${row.roleName}`); // the application owns its data
+    return { ...row, envId };
+  }
+  const url = async (envId: string) => (await secrets.forEnvironment(envId)).find((s) => s.startsWith('DATABASE_URL='))!.slice('DATABASE_URL='.length);
+  const parse = (u: string) => { const m = /^postgresql:\/\/([^:]+):([^@]+)@([^:/]+):(\d+)\/(.+)$/.exec(u)!; return { user: m[1], password: m[2], host: m[3], port: m[4], database: m[5] }; };
+  const asRole = (user: string, password: string, database: string): PgConn => ({ host: cfg.host, port: 5432, user, password, database });
+  const rotate = (id: string, p: DatabaseProvisioner = prov) => p.rotatePassword(id, { requestedById: 'admin-1', reason: 'scheduled rotation' });
+  const lastAudit = () => audit.filter((a) => a.action === 'database.rotate_password').pop()!;
+
+  it('gives the role a new password, proves a login with it, and replaces DATABASE_URL: the old password stops working', async () => {
+    const d = await provisioned('first');
+    const before = parse(await url(d.envId));
+    expect((await tools.query(asRole(before.user, before.password, d.pgName), 'SELECT count(*) FROM ledger')).trim()).toBe('3');
+
+    const done = await rotate(d.id);
+    expect(done.passwordRotatedAt).not.toBeNull();
+    expect(done.rotationError).toBeNull();
+
+    const after = parse(await url(d.envId));
+    expect(after).toMatchObject({ user: before.user, host: 'postgres', port: '5432', database: d.pgName }); // everything but the password is as it was
+    expect(after.password).not.toBe(before.password);
+    expect(after.password).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect((await tools.query(asRole(after.user, after.password, d.pgName), 'SELECT count(*) FROM ledger')).trim()).toBe('3'); // data untouched
+    await expect(tools.query(asRole(before.user, before.password, d.pgName), 'SELECT 1')).rejects.toThrow(/password authentication failed/);
+    expect(lastAudit()).toMatchObject({ result: 'SUCCESS', metadata: { reason: 'scheduled rotation', redeployNeeded: true } });
+  });
+
+  it('the password is in no AegisOps table, no audit entry and no error: only in Postgres and the encrypted secret', async () => {
+    const d = await provisioned('quiet');
+    const old = parse(await url(d.envId)).password;
+    await rotate(d.id);
+    const fresh = parse(await url(d.envId)).password;
+    const stored = await prisma.environmentSecret.findFirstOrThrow({ where: { environmentId: d.envId, name: 'DATABASE_URL' } });
+    for (const pw of [old, fresh]) {
+      expect(stored.valueEnc).not.toContain(pw);
+      expect(JSON.stringify(await prisma.database.findMany())).not.toContain(pw);
+      expect(JSON.stringify(audit)).not.toContain(pw);
+    }
+  });
+
+  it('a second rotation works and yields yet another password', async () => {
+    const d = await provisioned('twice');
+    const p0 = parse(await url(d.envId)).password;
+    await rotate(d.id);
+    const p1 = parse(await url(d.envId)).password;
+    await rotate(d.id);
+    const p2 = parse(await url(d.envId)).password;
+    expect(new Set([p0, p1, p2]).size).toBe(3);
+    expect((await tools.query(asRole(d.roleName, p2, d.pgName), 'SELECT 1')).trim()).toBe('1');
+  });
+
+  it('if the new connection string cannot be stored, the OLD password is put back and the application is unaffected', async () => {
+    const d = await provisioned('undo');
+    const before = parse(await url(d.envId));
+    const broken = new DatabaseProvisioner(prisma, tools, {
+      set: async () => { throw new Error('secret storage is unavailable'); },
+      forEnvironment: (e) => secrets.forEnvironment(e),
+    }, cfg, { record: async (e) => void audit.push({ action: e.action, result: e.result, metadata: e.metadata }) });
+    const r = await rotate(d.id, broken);
+    expect(r.passwordRotatedAt).toBeNull();
+    expect(r.rotationError).toMatch(/old password was put back/);
+    expect(await url(d.envId)).toBe(`postgresql://${before.user}:${before.password}@${before.host}:${before.port}/${before.database}`);
+    expect((await tools.query(asRole(before.user, before.password, d.pgName), 'SELECT count(*) FROM ledger')).trim()).toBe('3'); // the old password still works
+    expect(lastAudit()).toMatchObject({ result: 'ERROR' });
+    // and a later rotation with working storage succeeds, clearing the error
+    const ok = await rotate(d.id);
+    expect(ok.rotationError).toBeNull();
+  });
+
+  it('refuses, changing nothing, when DATABASE_URL no longer points at this database (someone replaced it)', async () => {
+    const d = await provisioned('replaced');
+    const before = parse(await url(d.envId));
+    await secrets.set(d.envId, 'DATABASE_URL', 'postgresql://someone:else@elsewhere.example:5432/theirs');
+    const r = await rotate(d.id);
+    expect(r.rotationError).toMatch(/no longer points at this database/);
+    expect(r.passwordRotatedAt).toBeNull();
+    expect((await tools.query(asRole(before.user, before.password, d.pgName), 'SELECT 1')).trim()).toBe('1'); // the role's password was never touched
+  });
+
+  it('refuses when there is no DATABASE_URL at all, and does nothing to a database that is not READY', async () => {
+    const d = await provisioned('nourl');
+    const before = parse(await url(d.envId));
+    await secrets.remove(d.envId, 'DATABASE_URL');
+    expect((await rotate(d.id)).rotationError).toMatch(/no longer points at this database/);
+    expect((await tools.query(asRole(before.user, before.password, d.pgName), 'SELECT 1')).trim()).toBe('1');
+
+    const e = await provisioned('removing');
+    const pw = parse(await url(e.envId)).password;
+    await prisma.database.update({ where: { id: e.id }, data: { status: 'DECOMMISSIONING' } });
+    const r = await rotate(e.id);
+    expect(r.status).toBe('DECOMMISSIONING');
+    expect(parse(await url(e.envId)).password).toBe(pw);
   });
 });
 

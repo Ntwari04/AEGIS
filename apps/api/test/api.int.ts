@@ -1115,7 +1115,7 @@ describe('database management and backups API: roles, confirmation and no leakag
     it('listing is visible to project members (developers see status, never internals); non-members get 404', async () => {
       const res = await http().get(base()).set(as('it-dev-a')).expect(200);
       expect(res.body.length).toBeGreaterThanOrEqual(2);
-      for (const d of res.body) expect(Object.keys(d).sort()).toEqual(['createdAt', 'environmentId', 'error', 'id', 'name', 'status']);
+      for (const d of res.body) expect(Object.keys(d).sort()).toEqual(['createdAt', 'decommissionedAt', 'environmentId', 'error', 'id', 'name', 'passwordRotatedAt', 'rotationError', 'status']);
       await http().get(base()).set(as('it-dev-b')).expect(404);
     });
   });
@@ -1205,6 +1205,123 @@ describe('database management and backups API: roles, confirmation and no leakag
     it('cannot overwrite from a failed, expired or foreign backup', async () => {
       for (const b of [failedBackup, expiredBackup]) await http().post(`${base()}/${dbId}/backups/${b}/overwrite`).set(as('it-admin')).send(good).expect(409);
       await http().post(`${base()}/${dbId}/backups/${otherDbBackup}/overwrite`).set(as('it-admin')).send(good).expect(404);
+    });
+  });
+
+  describe('password rotation: platform admin or the project devops engineer, with a recorded reason', () => {
+    const url = () => `${base()}/${dbId}/rotate-password`;
+    const good = { reason: 'scheduled quarterly rotation' };
+
+    it('developers and auditors are refused, anonymous is 401, and nothing is queued', async () => {
+      const before = dataJobs.length;
+      for (const u of ['it-dev-a', 'it-auditor']) await http().post(url()).set(as(u)).send(good).expect(403);
+      await http().post(url()).send(good).expect(401);
+      expect(dataJobs.length).toBe(before);
+    });
+
+    it('needs a real reason, and the project must be one the caller manages', async () => {
+      const before = dataJobs.length;
+      await http().post(url()).set(as('it-devops')).send({ reason: 'short' }).expect(400);
+      await http().post(url()).set(as('it-devops')).send({}).expect(400);
+      expect(dataJobs.length).toBe(before);
+      await http().post(`${base().replace(projectId, otherProjectId)}/${dbId}/rotate-password`).set(as('it-devops')).send(good).expect(404); // not their project
+    });
+
+    it('queues one rotation job with the reason for the devops engineer and for a platform admin, and audits both requests', async () => {
+      const before = dataJobs.length;
+      const a = await http().post(url()).set(as('it-devops')).send(good).expect(202);
+      await http().post(url()).set(as('it-admin')).send(good).expect(202);
+      expect(a.body).toEqual({ queued: true }); // no password, no names
+      expect(dataJobs.length).toBe(before + 2);
+      expect(lastJob()).toMatchObject({ name: 'rotate-password', data: { databaseId: dbId, reason: good.reason } });
+      const logged = await auditActions({ action: 'database.rotate_password.request' });
+      expect(logged.filter((x) => x.endsWith(':SUCCESS'))).toHaveLength(2);
+      expect(logged.filter((x) => x.endsWith(':ERROR')).length).toBeGreaterThanOrEqual(2); // the refused requests above are audited too
+      const entry = (await prisma.auditLogEntry.findMany({ where: { action: 'database.rotate_password.request' }, orderBy: { createdAt: 'desc' } }))[0];
+      expect(entry.metadata).toMatchObject({ database: 'main', reason: good.reason });
+    });
+
+    it('a database that is not READY cannot be rotated', async () => {
+      const busy = await prisma.database.create({ data: { projectId, environmentId: prodId, name: 'busy', pgName: 'app_data_ffffff', roleName: 'app_data_ffffff_u', status: 'DECOMMISSIONING' } });
+      const before = dataJobs.length;
+      await http().post(`${base()}/${busy.id}/rotate-password`).set(as('it-admin')).send(good).expect(409);
+      expect(dataJobs.length).toBe(before);
+      await prisma.database.delete({ where: { id: busy.id } });
+    });
+  });
+
+  describe('removal (deprovisioning): a separate, confirmed, admin-only step', () => {
+    let doomedId: string;
+    let retireEnvId: string;
+    const url = (id = () => doomedId) => `${base()}/${id()}/deprovision`;
+    const good = { confirm: 'doomed', reason: 'the project was retired' };
+
+    beforeAll(async () => {
+      retireEnvId = (await http().post(`/api/v1/projects/${projectId}/environments`).set(as('it-devops')).send({ name: 'retire' }).expect(201)).body.id;
+      doomedId = (await prisma.database.create({ data: { projectId, environmentId: retireEnvId, name: 'doomed', pgName: 'app_data_cccccc', roleName: 'app_data_cccccc_u', status: 'READY' } })).id;
+    });
+
+    it('is platform_admin ONLY: a devops engineer of the project, a developer and an auditor are all refused, and nothing is queued', async () => {
+      const before = dataJobs.length;
+      for (const u of ['it-devops', 'it-dev-a', 'it-auditor']) await http().post(url()).set(as(u)).send(good).expect(403);
+      await http().post(url()).send(good).expect(401);
+      expect(dataJobs.length).toBe(before);
+      expect((await prisma.database.findUniqueOrThrow({ where: { id: doomedId } })).status).toBe('READY');
+    });
+
+    it('needs the database name typed back and a real reason', async () => {
+      const before = dataJobs.length;
+      await http().post(url()).set(as('it-admin')).send({ confirm: 'Doomed', reason: good.reason }).expect(400);
+      await http().post(url()).set(as('it-admin')).send({ confirm: 'wrong', reason: good.reason }).expect(400);
+      await http().post(url()).set(as('it-admin')).send({ confirm: 'doomed', reason: 'short' }).expect(400);
+      await http().post(url()).set(as('it-admin')).send({ confirm: 'doomed' }).expect(400);
+      await http().post(url()).set(as('it-admin')).send({ reason: good.reason }).expect(400);
+      expect(dataJobs.length).toBe(before);
+      expect((await prisma.database.findUniqueOrThrow({ where: { id: doomedId } })).status).toBe('READY');
+    });
+
+    it("another project's database is a 404, and one that is still being created cannot be removed", async () => {
+      const other = await prisma.database.findFirstOrThrow({ where: { projectId: otherProjectId } });
+      await http().post(`${base()}/${other.id}/deprovision`).set(as('it-admin')).send({ confirm: 'theirs', reason: good.reason }).expect(404);
+      const making = await prisma.database.create({ data: { projectId, environmentId: prodId, name: 'making', pgName: 'app_data_dddddd', roleName: 'app_data_dddddd_u', status: 'PROVISIONING' } });
+      await http().post(url(() => making.id)).set(as('it-admin')).send({ confirm: 'making', reason: good.reason }).expect(409);
+      await prisma.database.delete({ where: { id: making.id } });
+    });
+
+    it('claims the database at once, queues exactly one removal job with the reason, and audits the request', async () => {
+      const before = dataJobs.length;
+      const res = await http().post(url()).set(as('it-admin')).send(good).expect(202);
+      expect(res.body).toMatchObject({ id: doomedId, name: 'doomed', status: 'DECOMMISSIONING' });
+      expect(dataJobs.length).toBe(before + 1);
+      expect(lastJob()).toMatchObject({ name: 'deprovision-db', data: { databaseId: doomedId, reason: good.reason } });
+      expect((await prisma.database.findUniqueOrThrow({ where: { id: doomedId } })).status).toBe('DECOMMISSIONING');
+      expect(await auditActions({ action: 'database.deprovision.request' })).toContain('database.deprovision.request:SUCCESS');
+      const entry = (await prisma.auditLogEntry.findMany({ where: { action: 'database.deprovision.request' }, orderBy: { createdAt: 'desc' } }))[0];
+      expect(entry).toMatchObject({ actorName: 'it-admin', targetId: doomedId });
+      expect(entry.metadata).toMatchObject({ database: 'doomed', reason: good.reason });
+    });
+
+    it('while it is being removed: a second request is refused, and no backup, overwrite or restore can be started on it', async () => {
+      const before = dataJobs.length;
+      await http().post(url()).set(as('it-admin')).send(good).expect(409);
+      await http().post(`${base()}/${doomedId}/backups`).set(as('it-devops')).expect(409);
+      expect(dataJobs.length).toBe(before);
+    });
+
+    it('once removed it stays in the list as REMOVED history, cannot be removed again, and frees its environment for a new database', async () => {
+      await prisma.database.update({ where: { id: doomedId }, data: { status: 'DECOMMISSIONED', decommissionedAt: new Date() } });
+      const list = (await http().get(base()).set(as('it-devops')).expect(200)).body;
+      expect(list.find((d: any) => d.id === doomedId)).toMatchObject({ status: 'DECOMMISSIONED' });
+      expect(JSON.stringify(list)).not.toMatch(/app_data_cccccc/);
+      await http().post(url()).set(as('it-admin')).send(good).expect(409);
+      const again = await http().post(base()).set(as('it-devops')).send({ name: 'doomed2', environmentId: retireEnvId }).expect(202);
+      expect(again.body).toMatchObject({ status: 'PROVISIONING' });
+    });
+
+    it('a database whose provisioning failed can be removed too', async () => {
+      const failed = await prisma.database.create({ data: { projectId, environmentId: prodId, name: 'broken', pgName: 'app_data_eeeeee', roleName: 'app_data_eeeeee_u', status: 'FAILED', error: 'boom' } });
+      await http().post(url(() => failed.id)).set(as('it-admin')).send({ confirm: 'broken', reason: good.reason }).expect(202);
+      expect((await prisma.database.findUniqueOrThrow({ where: { id: failed.id } })).status).toBe('DECOMMISSIONING');
     });
   });
 
