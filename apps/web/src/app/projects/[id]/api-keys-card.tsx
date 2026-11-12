@@ -14,7 +14,7 @@ export async function ApiKeysCard({ projectId }: { projectId: string }) {
       <span className="muted">(let your CI trigger a deployment of this project. Stored only as a hash; revoke one the moment it leaks or its owner leaves.)</span>
       {keys.length === 0 ? <p className="muted">No keys yet.</p> : (
         <table className="stack" data-testid="api-keys-table">
-          <thead><tr><th>Name</th><th>Starts with</th><th>Can</th><th>Last used</th><th /></tr></thead>
+          <thead><tr><th>Name</th><th>Starts with</th><th>Can</th><th>Last used</th><th><span className="sr-only">Actions</span></th></tr></thead>
           <tbody>
             {keys.map((k) => (
               <tr key={k.id} data-testid={`api-key-${k.name}`}>

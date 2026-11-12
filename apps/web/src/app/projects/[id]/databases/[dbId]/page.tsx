@@ -73,7 +73,7 @@ export default async function DatabasePage({ params, searchParams }: { params: P
         <p className="note">Nightly backups run automatically (encrypted, stored off this server). Manual backups are kept 30 days.</p>
         {data.backups.length === 0 ? <p className="muted">No backups yet.</p> : (
           <table className="stack" data-testid="backup-history">
-            <thead><tr><th>When</th><th>Kind</th><th>Status</th><th>Size</th><th /></tr></thead>
+            <thead><tr><th>When</th><th>Kind</th><th>Status</th><th>Size</th><th><span className="sr-only">Actions</span></th></tr></thead>
             <tbody>
               {data.backups.map((b) => (
                 <tr key={b.id}>

@@ -36,6 +36,15 @@ Steps 7 to 17 go beyond the eight, covering the screens added after Phase 5:
 | 16 | Updates in place | during a deployment that takes a minute the history changes by itself, the page is never reloaded, and text typed into another form and a fold opened by hand are still there afterwards; no `meta refresh` remains |
 | 17 | CI key | a key is shown once and only its prefix afterwards; it triggers a deployment of its own project; after revoking it, the same call returns `401` |
 
+A second file, `tests/03-accessibility.spec.ts`, guards FR-UX-7:
+
+| Test | What it proves |
+|---|---|
+| Every screen | an axe-core scan (WCAG 2.1 A and AA plus best-practice rules) of sign-in, the not-found page, Projects, New project, a project page, its logs page, Infrastructure, Backups, Audit and the API reference, in dark and light, at 1280 px and 380 px, with every fold open, finds no violation |
+| Keyboard | the first Tab stop is a "Skip to content" link that works, the navigation is a named landmark that marks the current page, and a focused nav link shows an outline |
+
+Automated rules cover only part of accessibility (not reading order, wording or screen-reader announcements), and Keycloak's own sign-in pages are not scanned.
+
 ## Things to know
 
 - **Step 3 deploys from the dashboard, not from a GitHub push.** Both create the same deployment, and the webhook path is covered by `apps/api/test/api.int.ts`.

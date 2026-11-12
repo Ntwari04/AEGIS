@@ -174,7 +174,7 @@ export default async function ProjectsPage() {
               <div className="empty-box"><p className="muted">No environments yet.</p></div>
             ) : (
               <table className="stack">
-                <thead><tr><th>Environment</th><th>Deployment</th><th>Health</th><th>CPU</th><th>Memory</th><th>Storage</th><th>Alerts</th><th /></tr></thead>
+                <thead><tr><th>Environment</th><th>Deployment</th><th>Health</th><th>CPU</th><th>Memory</th><th>Storage</th><th>Alerts</th><th><span className="sr-only">Links</span></th></tr></thead>
                 <tbody>{p.environments.map((e) => <EnvRow key={e.id} projectId={p.id} e={e} />)}</tbody>
               </table>
             )}

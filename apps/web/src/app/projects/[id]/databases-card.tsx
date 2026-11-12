@@ -41,7 +41,7 @@ export async function DatabasesCard({ projectId, environments, roles }: { projec
         <p className="muted">No databases yet.</p>
       ) : (
         <table className="stack">
-          <thead><tr><th>Name</th><th>Environment</th><th>Status</th><th /></tr></thead>
+          <thead><tr><th>Name</th><th>Environment</th><th>Status</th><th><span className="sr-only">Actions</span></th></tr></thead>
           <tbody>
             {dbs.map((d) => (
               <tr key={d.id} data-testid={`db-${d.name}`}>

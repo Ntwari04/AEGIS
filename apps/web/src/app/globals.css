@@ -4,12 +4,17 @@
   /* Status is reserved: never the brand accent, never an identity colour. Severity values in use are `critical` and `warning` only
      (alert rules and AlertDto); --serious is defined for a future tier and is not used yet. */
   --good:#22b14c; --warning:#e8a93a; --serious:#e8794f; --critical:#e14b4b;
+  /* Text on a tinted pill and on a filled button, tuned so each pair clears WCAG AA (4.5:1) in this theme. */
+  --good-text:#3fcf68; --warning-text:#f0b64a; --critical-text:#ff7b7b;
+  --on-accent:#0b0e13; --danger-solid:#c23636;
 }
 @media (prefers-color-scheme: light) {
   :root {
     --plane:#f7f8fa; --panel:#ffffff; --panel-2:#f0f2f5; --line:#d8dee4; --line-soft:#e6e9ed;
     --fg:#1f2328; --muted:#59636e; --accent:#0969da;
     --good:#1a7f37; --warning:#9a6700; --serious:#bc4c1f; --critical:#cf222e;
+    --good-text:#14692c; --warning-text:#7d5400; --critical-text:#b0141f;
+    --on-accent:#ffffff; --danger-solid:#cf222e;
   }
 }
 :root {
@@ -58,19 +63,19 @@ th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line-s
 th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.4px; border-bottom-color:var(--line); }
 label { display:block; margin:10px 0 4px; font-size:13px; color:var(--muted); }
 input, textarea { width:100%; padding:8px 10px; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; font:inherit; }
-button, .btn { display:inline-block; margin-top:14px; padding:8px 14px; background:var(--accent); color:#fff; border:0; border-radius:6px; font:inherit; cursor:pointer; }
+button, .btn { display:inline-block; margin-top:14px; padding:8px 14px; background:var(--accent); color:var(--on-accent); font-weight:500; border:0; border-radius:6px; font:inherit; cursor:pointer; }
 button.link { background:none; color:var(--accent); margin:0; padding:0; }
 .muted { color:var(--muted); }
-.error { color:var(--bad); }
+.error { color:var(--critical-text); }
 .row { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px 16px; margin-bottom:16px; }
 .row h1 { margin-bottom:0; }
 .row .btn, .row button { margin-top:0; }
 .center { text-align:center; margin-top:15vh; }
 /* Pills: a solid tint of the status colour with the word beside it, so colour is never the only signal. */
 .status, .state, .sev { font-size:12px; font-weight:600; border-radius:999px; padding:1px 9px; color:var(--muted); background:var(--neutral-bg); border:1px solid color-mix(in srgb, currentColor 35%, transparent); }
-.status[data-status=SUCCESS] { color:var(--good); background:var(--good-bg); }
-.status[data-status=FAILED], .status[data-status=ROLLED_BACK] { color:var(--critical); background:var(--critical-bg); }
-.status[data-status=PENDING], .status[data-status=RUNNING] { color:var(--warning); background:var(--warning-bg); }
+.status[data-status=SUCCESS] { color:var(--good-text); background:var(--good-bg); }
+.status[data-status=FAILED], .status[data-status=ROLLED_BACK] { color:var(--critical-text); background:var(--critical-bg); }
+.status[data-status=PENDING], .status[data-status=RUNNING] { color:var(--warning-text); background:var(--warning-bg); }
 .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 16px; }
 .inline { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end; }
 .inline input:not([type=checkbox]) { flex:1; min-width:140px; }
@@ -81,20 +86,25 @@ button.link { background:none; color:var(--accent); margin:0; padding:0; }
 .check { display:flex; align-items:center; gap:8px; margin-top:12px; }
 .check input { width:auto; }
 mono, .mono { font-family:var(--font-mono); font-size:13px; }
-.state[data-state=up] { color:var(--good); background:var(--good-bg); }
-.state[data-state=down] { color:var(--critical); background:var(--critical-bg); }
-.state[data-state=restarting] { color:var(--warning); background:var(--warning-bg); }
+.state[data-state=up] { color:var(--good-text); background:var(--good-bg); }
+.state[data-state=down] { color:var(--critical-text); background:var(--critical-bg); }
+.state[data-state=restarting] { color:var(--warning-text); background:var(--warning-bg); }
 /* none / unknown stay neutral (the base pill). */
-.sev { border-radius:6px; padding:0 7px; color:var(--warning); background:var(--warning-bg); }
-.sev[data-sev=critical] { color:var(--critical); background:var(--critical-bg); }
+.sev { border-radius:6px; padding:0 7px; color:var(--warning-text); background:var(--warning-bg); }
+.sev[data-sev=critical] { color:var(--critical-text); background:var(--critical-bg); }
+
+.sr-only { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+.skip { position:absolute; left:8px; top:-48px; z-index:10; padding:8px 14px; border-radius:8px; background:var(--panel); color:var(--fg); border:2px solid var(--accent); }
+.skip:focus { top:8px; }
+main:focus { outline:none; }
 .alerts { margin:0; padding-left:0; list-style:none; font-size:13px; }
 .alerts li { margin:2px 0; }
 .stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; margin-top:12px; }
 .stats > div { background:var(--panel-2); border:1px solid var(--line-soft); border-radius:10px; padding:12px 14px; }
 .stats .muted { font-size:13px; }
 .big { font-family:var(--font-display); font-size:26px; font-weight:600; line-height:1.2; }
-.big[data-bad=true] { color:var(--critical); }
-.big[data-bad=false] { color:var(--good); }
+.big[data-bad=true] { color:var(--critical-text); }
+.big[data-bad=false] { color:var(--good-text); }
 
 /* A thin meter beside a number: accent normally, warning then critical as it nears the alert threshold (FR-MON-3). */
 .meter { display:block; height:5px; margin-top:5px; border-radius:999px; background:var(--line); overflow:hidden; min-width:64px; }
@@ -108,9 +118,9 @@ mono, .mono { font-family:var(--font-mono); font-size:13px; }
 .links a { white-space:nowrap; }
 select { width:100%; padding:8px 10px; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; font:inherit; }
 .danger { border-color:var(--bad); }
-.danger button { background:var(--bad); }
+.danger button { background:var(--danger-solid); color:#fff; }
 .note { color:var(--muted); font-size:13px; margin:6px 0 0; }
-.ok { color:var(--good); }
+.ok { color:var(--good-text); }
 
 /* Phones: one column, tables scroll sideways inside their card instead of spilling out of it, a tighter page.
    The sidebar becomes a row above the page (reflow, not a hidden menu). */
@@ -137,10 +147,10 @@ select { width:100%; padding:8px 10px; background:var(--bg); color:var(--fg); bo
 .operation summary { cursor:pointer; display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
 .operation .roles { margin-left:auto; display:flex; flex-wrap:wrap; gap:4px; }
 .method { display:inline-block; min-width:56px; text-align:center; font-size:12px; font-weight:700; border-radius:4px; padding:1px 6px; border:1px solid currentColor; }
-.method[data-method=get] { color:var(--good); }
+.method[data-method=get] { color:var(--good-text); }
 .method[data-method=post] { color:var(--accent); }
-.method[data-method=put], .method[data-method=patch] { color:var(--warn); }
-.method[data-method=delete] { color:var(--bad); }
+.method[data-method=put], .method[data-method=patch] { color:var(--warning-text); }
+.method[data-method=delete] { color:var(--critical-text); }
 
 /* Live logs */
 .live-box { margin:12px 0 0; max-height:360px; min-height:120px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px; }

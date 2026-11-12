@@ -63,13 +63,13 @@ export default async function ApiDocsPage() {
               </summary>
               <p className="note">{op.description}</p>
               {(op.parameters ?? []).length > 0 && (
-                <table>
+                <table className="kv">
                   <thead><tr><th>Parameter</th><th>In</th><th>Required</th><th>Rules</th></tr></thead>
                   <tbody>{op.parameters!.map((p) => <tr key={`${p.in}-${p.name}`}><td className="mono">{p.name}</td><td>{p.in}</td><td>{p.required ? 'yes' : ''}</td><td className="muted">{rules(p.schema)}</td></tr>)}</tbody>
                 </table>
               )}
               {op.requestBody && Object.entries(op.requestBody.content).map(([type, c]) => (
-                <table key={type}>
+                <table className="kv" key={type}>
                   <thead><tr><th>Body field ({type})</th><th>Required</th><th>Rules</th></tr></thead>
                   <tbody>{Object.entries(c.schema.properties ?? {}).map(([name, s]) => <tr key={name}><td className="mono">{name}</td><td>{c.schema.required?.includes(name) ? 'yes' : ''}</td><td className="muted">{rules(s)}</td></tr>)}</tbody>
                 </table>

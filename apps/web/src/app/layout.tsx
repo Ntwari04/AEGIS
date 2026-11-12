@@ -42,6 +42,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
       <body>
         {session?.user ? (
           <div className="shell">
+            <a className="skip" href="#main">Skip to content</a>
             <aside className="side">
               <Link href="/" className="brand"><Mark /><span className="brand-word">AegisOps</span></Link>
               <Nav roles={roles} />
@@ -56,12 +57,12 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
                 </form>
               </div>
             </aside>
-            <main>{children}</main>
+            <main id="main" tabIndex={-1}>{children}</main>
           </div>
         ) : (
           <>
             <header className="top-brand"><Link href="/" className="brand"><Mark /><span className="brand-word">AegisOps</span></Link></header>
-            <main>{children}</main>
+            <main id="main">{children}</main>
           </>
         )}
       </body>

@@ -233,7 +233,7 @@ export default async function ProjectDetail({
               )}
               {deployments.length > 0 && (
                 <table className="stack" data-testid={`history-${e.name}`}>
-                  <thead><tr><th>Status</th><th>Commit</th><th>Source</th><th>Started</th><th /></tr></thead>
+                  <thead><tr><th>Status</th><th>Commit</th><th>Source</th><th>Started</th><th><span className="sr-only">Actions</span></th></tr></thead>
                   <tbody>
                     {deployments.map((d) => (
                       <tr key={d.id}>
