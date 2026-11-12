@@ -21,6 +21,7 @@ It fails on a missing or placeholder secret, a weak or common value, the same va
 | `SECRETS_ENCRYPTION_KEY` | `.env` + **a copy off the server** | api (write), deployer + data-worker (read) | with the database: every environment secret readable | see "Keys" below |
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | `.env` | data-worker | read/delete of the backup archives (still encrypted) | rotate in the provider, update `.env`, restart data-worker |
 | `REDIS_PASSWORD` | `.env` | api, deployer, data-worker | queue tampering: could enqueue jobs | change in `.env`, recreate redis and its clients |
+| `KEYCLOAK_ADMIN_CLIENT_SECRET` | `.env`, Keycloak (`aegisops-admin` client) | api | create users, assign any role, reset any password: **effectively every account** (Keycloak's `manage-users` can map any realm role; the API only ever offers the four platform roles, but the secret itself is not limited that way) | `bootstrap.sh add-admin-client`, update `.env`, restart `api` |
 | `KEYCLOAK_CLIENT_SECRET`, `GRAFANA_OAUTH_SECRET` | `.env`, Keycloak | web / grafana, keycloak | impersonate that client | `bootstrap.sh` / Keycloak admin, update `.env` |
 | `AUTH_SECRET` | `.env` | web | forge session cookies | change, restart web (signs everyone out) |
 | `KC_BOOTSTRAP_ADMIN_*` | `.env` | keycloak | Keycloak admin | replace with `rotate-bootstrap-admin` (Phase 2 runbook), then remove |

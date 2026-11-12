@@ -19,6 +19,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 jest.setTimeout(240_000);
 
 const CLIENT_SECRET = 'integration-test-client-secret';
+const ADMIN_CLIENT_SECRET = 'integration-test-admin-client-secret';
 const PASSWORD = 'Integration-Pw-12345';
 const USERS = [
   { username: 'it-admin', role: 'platform_admin' },
@@ -27,6 +28,7 @@ const USERS = [
   { username: 'it-dev-b', role: 'developer' },
   { username: 'it-auditor', role: 'auditor' },
   { username: 'it-session', role: 'developer' }, // only the session-revocation tests touch this one
+  { username: 'it-managed', role: 'developer' }, // only the users-and-roles tests change this one
 ];
 
 let pg: StartedPostgreSqlContainer;
@@ -65,16 +67,17 @@ function realmForTests() {
     .replace(/\$\{KEYCLOAK_CLIENT_SECRET\}/g, CLIENT_SECRET)
     .replace(/\$\{WEB_ORIGIN\}/g, 'http://localhost:13000')
     .replace(/\$\{GRAFANA_OAUTH_SECRET\}/g, 'grafana-test-secret')
+    .replace(/\$\{KEYCLOAK_ADMIN_CLIENT_SECRET\}/g, ADMIN_CLIENT_SECRET)
     .replace(/\$\{GRAFANA_ORIGIN\}/g, 'https://grafana.test.example');
   const realm = JSON.parse(raw);
   // Test-only differences: password grant so we can mint real tokens without a browser, plus seeded users.
   realm.clients[0].directAccessGrantsEnabled = true;
-  realm.users = USERS.map((u) => ({
+  realm.users = [...(realm.users ?? []), ...USERS.map((u) => ({
     username: u.username, email: `${u.username}@example.test`, firstName: 'It', lastName: u.username,
     enabled: true, emailVerified: true,
     credentials: [{ type: 'password', value: PASSWORD, temporary: false }],
     realmRoles: [u.role],
-  }));
+  }))];
   return JSON.stringify(realm);
 }
 
@@ -130,6 +133,7 @@ beforeAll(async () => {
     KEYCLOAK_ISSUER: `${kcUrl}/realms/aegisops`,
     KEYCLOAK_JWKS_URI: `${kcUrl}/realms/aegisops/protocol/openid-connect/certs`,
     KEYCLOAK_AUDIENCE: 'aegisops-api',
+    KEYCLOAK_ADMIN_CLIENT_SECRET: ADMIN_CLIENT_SECRET,
     GITHUB_WEBHOOK_SECRET: WH_SECRET,
     SECRETS_ENCRYPTION_KEY: randomBytes(32).toString('base64'),
     GRAFANA_PUBLIC_URL: 'https://grafana.test.example',
@@ -1501,5 +1505,109 @@ describe('infrastructure management: servers, container controls, logs, cordon a
       await http().post(deployUrl(stagingId)).set(as('it-devops')).send({ commitSha: SHA }).expect(201);
       expect(await auditActions({ action: 'server.uncordon' })).toContain('server.uncordon:SUCCESS');
     });
+  });
+});
+
+describe('users and roles screen: platform admin only, through a limited Keycloak service account (Platform Admin persona)', () => {
+  const base = '/api/v1/admin/users';
+  const managedId = async () => (await http().get(`${base}?search=it-managed`).set(as('it-admin')).expect(200)).body.find((u: any) => u.username === 'it-managed').id;
+  const passwordGrant = (username: string, password: string) => fetch(`${kcUrl}/realms/aegisops/protocol/openid-connect/token`, {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'password', client_id: 'aegisops-web', client_secret: CLIENT_SECRET, username, password }),
+  });
+
+  it('nobody but a platform admin may list, create or change users', async () => {
+    for (const who of ['it-devops', 'it-dev-a', 'it-auditor']) {
+      await http().get(base).set(as(who)).expect(403);
+      await http().post(base).set(as(who)).send({ username: 'nope-user', email: 'n@example.test', role: 'developer' }).expect(403);
+    }
+    await http().get(base).expect(401);
+  });
+
+  it('lists people with their one platform role and marks the caller', async () => {
+    const list = (await http().get(base).set(as('it-admin')).expect(200)).body;
+    const me = list.find((u: any) => u.username === 'it-admin');
+    expect(me).toMatchObject({ roles: ['platform_admin'], enabled: true, you: true });
+    expect(list.find((u: any) => u.username === 'it-auditor')).toMatchObject({ roles: ['auditor'], you: false });
+    const found = (await http().get(`${base}?search=it-dev-a`).set(as('it-admin')).expect(200)).body;
+    expect(found.map((u: any) => u.username)).toEqual(['it-dev-a']);
+  });
+
+  it('creates a person with a temporary password shown once, the chosen role, and no password in the audit log', async () => {
+    const res = await http().post(base).set(as('it-admin')).send({ username: 'it-new-person', email: 'it-new@example.test', role: 'auditor' }).expect(201);
+    expect(res.body).toMatchObject({ username: 'it-new-person', role: 'auditor' });
+    expect(res.body.temporaryPassword).toMatch(/^[A-Za-z2-9]{20}$/);
+    const list = (await http().get(`${base}?search=it-new-person`).set(as('it-admin')).expect(200)).body;
+    expect(list[0]).toMatchObject({ username: 'it-new-person', roles: ['auditor'], enabled: true });
+    // a temporary password is not a working sign-in: Keycloak makes them replace it first
+    expect((await passwordGrant('it-new-person', res.body.temporaryPassword)).ok).toBe(false);
+    expect(await auditActions({ action: 'admin.user.create' })).toContain('admin.user.create:SUCCESS');
+    const rows = await prisma.auditLogEntry.findMany({ where: { action: 'admin.user.create' } });
+    expect(JSON.stringify(rows)).not.toContain(res.body.temporaryPassword);
+    expect(rows[rows.length - 1].metadata).toMatchObject({ username: 'it-new-person', role: 'auditor' });
+    // a second one with the same name is refused, and the form data is validated
+    await http().post(base).set(as('it-admin')).send({ username: 'it-new-person', email: 'other@example.test', role: 'auditor' }).expect(409);
+    await http().post(base).set(as('it-admin')).send({ username: 'Bad Name!', email: 'x@example.test', role: 'auditor' }).expect(400);
+    await http().post(base).set(as('it-admin')).send({ username: 'ok-name', email: 'not-an-email', role: 'auditor' }).expect(400);
+    await http().post(base).set(as('it-admin')).send({ username: 'ok-name', email: 'x@example.test', role: 'super_admin' }).expect(400);
+  });
+
+  it('changing a role takes effect at once: the old token is refused, and the change is audited with from and to', async () => {
+    const id = await managedId();
+    tokens['it-managed'] = await login('it-managed');
+    await http().get('/api/v1/me').set(as('it-managed')).expect(200);
+    await new Promise((r) => setTimeout(r, 1100)); // tokens are cut off by the second they were issued in
+    await http().put(`${base}/${id}/role`).set(as('it-admin')).send({ role: 'auditor' }).expect(200);
+    const refused = await http().get('/api/v1/me').set(as('it-managed')).expect(401);
+    expect(refused.body.error.message).toBe('Session ended: sign in again');
+    await new Promise((r) => setTimeout(r, 1100));
+    tokens['it-managed'] = await login('it-managed');
+    expect((await http().get('/api/v1/me').set(as('it-managed')).expect(200)).body.roles).toEqual(expect.arrayContaining(['auditor']));
+    expect((await http().get(`${base}?search=it-managed`).set(as('it-admin')).expect(200)).body[0].roles).toEqual(['auditor']);
+    const entry = (await prisma.auditLogEntry.findMany({ where: { action: 'admin.user.role_change' }, orderBy: { createdAt: 'desc' } }))[0];
+    expect(entry).toMatchObject({ actorName: 'it-admin', result: 'SUCCESS', targetId: id });
+    expect(entry.metadata).toMatchObject({ username: 'it-managed', from: ['developer'], to: 'auditor' });
+    await http().put(`${base}/${id}/role`).set(as('it-admin')).send({ role: 'developer' }).expect(200); // put it back
+  });
+
+  it('a platform admin cannot lock themselves out: not their own role, not disabling or resetting themselves', async () => {
+    const me = (await http().get(`${base}?search=it-admin`).set(as('it-admin')).expect(200)).body.find((u: any) => u.username === 'it-admin').id;
+    await http().put(`${base}/${me}/role`).set(as('it-admin')).send({ role: 'developer' }).expect(409);
+    await http().post(`${base}/${me}/disable`).set(as('it-admin')).expect(409);
+    await http().post(`${base}/${me}/reset-password`).set(as('it-admin')).expect(409);
+    await http().get('/api/v1/me').set(as('it-admin')).expect(200); // still an admin, still signed in
+  });
+
+  it('disabling a person ends their access and enabling restores it; resetting gives a new temporary password once', async () => {
+    const id = await managedId();
+    await new Promise((r) => setTimeout(r, 1100)); // the previous test changed this account's role a moment ago
+    tokens['it-managed'] = await login('it-managed');
+    await http().get('/api/v1/me').set(as('it-managed')).expect(200);
+    await new Promise((r) => setTimeout(r, 1100));
+    await http().post(`${base}/${id}/disable`).set(as('it-admin')).expect(200);
+    await http().get('/api/v1/me').set(as('it-managed')).expect(401);
+    expect((await passwordGrant('it-managed', PASSWORD)).ok).toBe(false);
+    expect((await http().get(`${base}?search=it-managed`).set(as('it-admin')).expect(200)).body[0].enabled).toBe(false);
+    await http().post(`${base}/${id}/enable`).set(as('it-admin')).expect(200);
+    await new Promise((r) => setTimeout(r, 1100)); // a token minted in the same second as the cut-off is refused too
+    tokens['it-managed'] = await login('it-managed');
+    await http().get('/api/v1/me').set(as('it-managed')).expect(200);
+
+    await new Promise((r) => setTimeout(r, 1100));
+    const reset = (await http().post(`${base}/${id}/reset-password`).set(as('it-admin')).expect(200)).body;
+    expect(reset.temporaryPassword).toMatch(/^[A-Za-z2-9]{20}$/);
+    const rows = await prisma.auditLogEntry.findMany({ where: { action: 'admin.user.reset_password' } });
+    expect(JSON.stringify(rows)).not.toContain(reset.temporaryPassword);
+    await http().get('/api/v1/me').set(as('it-managed')).expect(401); // sessions ended with the reset
+    await http().post(`${base}/${id}/sign-out`).set(as('it-admin')).expect(200);
+  });
+
+  it('an unknown person is a 404, and every action is audited', async () => {
+    await http().post(`${base}/00000000-0000-0000-0000-000000000000/disable`).set(as('it-admin')).expect(404);
+    const actions = await auditActions();
+    for (const a of ['admin.user.create', 'admin.user.role_change', 'admin.user.disable', 'admin.user.enable', 'admin.user.reset_password', 'admin.user.sign_out']) {
+      expect(actions.some((x) => x.startsWith(`${a}:`))).toBe(true);
+    }
+    expect(actions).toContain('admin.user.disable:ERROR');
   });
 });

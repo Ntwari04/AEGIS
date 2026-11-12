@@ -7,6 +7,11 @@ export interface AppEnv {
   keycloakIssuer: string;
   keycloakJwksUri: string;
   keycloakAudience: string;
+  /**
+   * The service account the users screen acts through. Optional: without KEYCLOAK_ADMIN_CLIENT_SECRET the platform runs as before and
+   * the users endpoints answer 503. The base URL defaults to the origin of the JWKS address (Keycloak as this API reaches it).
+   */
+  keycloakAdmin: { baseUrl: string; realm: string; clientId: string; secret: string } | null;
 }
 
 const REQUIRED = [
@@ -36,6 +41,14 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     keycloakIssuer: source.KEYCLOAK_ISSUER!,
     keycloakJwksUri: source.KEYCLOAK_JWKS_URI!,
     keycloakAudience: source.KEYCLOAK_AUDIENCE!,
+    keycloakAdmin: source.KEYCLOAK_ADMIN_CLIENT_SECRET
+      ? {
+          baseUrl: (source.KEYCLOAK_ADMIN_URL ?? new URL(source.KEYCLOAK_JWKS_URI!).origin).replace(/\/+$/, ''),
+          realm: source.KEYCLOAK_ISSUER!.split('/').filter(Boolean).pop() ?? 'aegisops',
+          clientId: source.KEYCLOAK_ADMIN_CLIENT_ID ?? 'aegisops-admin',
+          secret: source.KEYCLOAK_ADMIN_CLIENT_SECRET,
+        }
+      : null,
   };
 }
 

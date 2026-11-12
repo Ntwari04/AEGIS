@@ -260,6 +260,33 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "aegisops-admin",
+      "name": "AegisOps users screen (service account)",
+      "description": "Used only by the AegisOps API, server to server, to manage users and the four platform roles. No browser flows.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "${KEYCLOAK_ADMIN_CLIENT_SECRET}",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": true,
+      "attributes": {
+        "access.token.lifespan": "300"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "service-account-aegisops-admin",
+      "enabled": true,
+      "serviceAccountClientId": "aegisops-admin",
+      "clientRoles": {
+        "realm-management": ["view-users", "query-users", "manage-users", "view-realm"]
+      }
     }
   ]
 }

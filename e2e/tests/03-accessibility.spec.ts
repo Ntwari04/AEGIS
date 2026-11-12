@@ -38,7 +38,7 @@ test.describe('accessibility (WCAG 2.1 AA, automated)', () => {
       expect(project, 'the scan needs at least one project to open its page').toBeTruthy();
       await page.goto(project!);
       const logs = await page.locator('a[href*="/logs"]').first().getAttribute('href');
-      const paths = ['/projects', '/projects/new', project!, ...(logs ? [logs] : []), '/infra', '/backups', '/audit', '/api/docs'];
+      const paths = ['/projects', '/projects/new', project!, ...(logs ? [logs] : []), '/infra', '/backups', '/audit', '/admin/users', '/api/docs'];
 
       for (const scheme of ['dark', 'light'] as const) {
         await page.emulateMedia({ colorScheme: scheme });

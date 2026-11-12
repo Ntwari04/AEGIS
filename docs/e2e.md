@@ -36,6 +36,15 @@ Steps 7 to 17 go beyond the eight, covering the screens added after Phase 5:
 | 16 | Updates in place | during a deployment that takes a minute the history changes by itself, the page is never reloaded, and text typed into another form and a fold opened by hand are still there afterwards; no `meta refresh` remains |
 | 17 | CI key | a key is shown once and only its prefix afterwards; it triggers a deployment of its own project; after revoking it, the same call returns `401` |
 
+`tests/04-users-and-roles.spec.ts` covers the Platform Admin persona (the person it creates is named `e2e-person-…`, removed afterwards and found by `npm run cleanup` if a run dies):
+
+| Test | What it proves |
+|---|---|
+| Add a person | a platform admin opens **Users**, sees no lock-out controls on their own row, adds a person with a role; a 20-character temporary password is shown once and is gone after a reload; the same name twice is refused in the form |
+| Change a person | role change, password reset, disable and enable each take effect and say so on the page |
+| Audit | every one of those actions is in the audit log (`admin.*`), with the target and no password |
+| Everyone else | a developer has no **Users** link, gets 404 on the page and cannot call the API |
+
 A second file, `tests/03-accessibility.spec.ts`, guards FR-UX-7:
 
 | Test | What it proves |

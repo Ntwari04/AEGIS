@@ -100,6 +100,7 @@ services:
       WEB_ORIGIN: https://${DOMAIN}
       GRAFANA_ORIGIN: https://grafana.${DOMAIN}
       GRAFANA_OAUTH_SECRET: ${GRAFANA_OAUTH_SECRET:?set in infra/.env}
+      KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_ADMIN_CLIENT_SECRET:?set in infra/.env}
     volumes:
       - ./keycloak/realm-aegisops.json:/opt/keycloak/data/import/realm-aegisops.json:ro
     depends_on:
@@ -131,6 +132,8 @@ services:
       KEYCLOAK_ISSUER: https://auth.${DOMAIN}/realms/aegisops
       KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/aegisops/protocol/openid-connect/certs
       KEYCLOAK_AUDIENCE: aegisops-api
+      # The users and roles screen (Platform Admin): a service account limited to managing users. The API reaches Keycloak on the internal network.
+      KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_ADMIN_CLIENT_SECRET:?set in infra/.env}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?set in infra/.env}
       GITHUB_DEPLOY_WORKFLOW: ${GITHUB_DEPLOY_WORKFLOW:-Build image}
       # Dashboard health data (FR-DASH-3): read from Prometheus / Alertmanager on the internal network

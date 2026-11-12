@@ -40,7 +40,12 @@ Never `docker compose down -v`: that deletes the database volumes.
 
 ## 3. A person's account is compromised, or they have left
 
-1. Disable the account and end their sessions (**tested**), from `infra/`:
+1. **Easiest (platform admin): Users → find them → Disable.** It disables the account in Keycloak, ends their Keycloak sessions and makes the API refuse every token
+   they hold, at once (not within a minute). *Sign out everywhere* does the sign-out without disabling, and *Reset password* gives a new temporary password and also ends
+   their sessions. Each action is in the audit log (`admin.user.*`). You cannot disable yourself, and the last enabled platform admin cannot be disabled or demoted.
+   If the Users screen is unavailable (Keycloak admin client not set up, or you are locked out), use the command line below.
+
+   Command line (**tested**), from `infra/`:
    ```
    docker exec -it aegisops-keycloak sh
    /opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD"
@@ -68,6 +73,7 @@ The full inventory, with blast radius per secret, is in [secrets-review.md](secr
 | `POSTGRES_SUPERUSER_PASSWORD`, `AEGISOPS_DB_PASSWORD`, `KEYCLOAK_DB_PASSWORD`, `AEGIS_BACKUP_DB_PASSWORD`, `AEGIS_PROVISIONER_DB_PASSWORD` | `ALTER ROLE ...` then update `infra/.env` and recreate the services that use it. |
 | `AUTH_SECRET` | Change it and restart `web`. Everybody is signed out. |
 | `KEYCLOAK_CLIENT_SECRET`, `GRAFANA_OAUTH_SECRET` | Change in Keycloak and `.env` together, restart the client. |
+| `KEYCLOAK_ADMIN_CLIENT_SECRET` (the Users screen's service account) | **Treat a leak as a full compromise of every account**: it can create users, assign roles and reset passwords. Generate a new one (`node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`), put it in `infra/.env`, run `bootstrap.sh add-admin-client` with it (this updates the client's secret), restart `api`. Then review `admin.user.*` in the audit log and the user list for accounts or roles nobody made. To switch the screen off entirely, disable the `aegisops-admin` client in Keycloak. |
 | `GITHUB_WEBHOOK_SECRET`, the GitHub App private key | Rotate in the GitHub App settings and `.env` / `infra/secrets/github-app.pem` together; restart `api` and `deployer`. |
 | `GHCR_TOKEN`, `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`, `ALERT_SLACK_WEBHOOK_URL` | Create a new one at the provider, update `.env`, restart the service, then delete the old one. For the Slack webhook, recreate the incoming webhook in Slack. |
 | `BACKUP_ENCRYPTION_KEY` | A new key applies to new backups only. **Keep the old key** until the last backup made under it has aged out of retention. |

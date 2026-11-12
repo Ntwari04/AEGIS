@@ -19,7 +19,7 @@
 #   docker exec -e MASTER_ADMIN_USERNAME=you -e MASTER_ADMIN_PASSWORD='...' \
 #               aegisops-keycloak sh /tmp/bootstrap.sh rotate-bootstrap-admin
 #
-# Commands: create-admin | rotate-bootstrap-admin | add-grafana-client | seed-dev-users (local only)
+# Commands: create-admin | rotate-bootstrap-admin | add-grafana-client | add-admin-client | seed-dev-users (local only)
 
 set -eu
 KCADM=/opt/keycloak/bin/kcadm.sh
@@ -86,6 +86,28 @@ case "${1:-}" in
         -s 'config."id.token.claim"=true' -s 'config."access.token.claim"=true' -s 'config."userinfo.token.claim"=true'
       echo "   created client 'aegisops-grafana'"
     fi
+    ;;
+
+  add-admin-client)
+    # The service account behind the Users screen. For a realm imported before it existed (a fresh realm gets it from the realm file). Idempotent.
+    # It may view and manage users and view the realm, nothing else; browser flows are off.
+    : "${KEYCLOAK_ADMIN_CLIENT_SECRET:?}"
+    login
+    if "$KCADM" get clients -r "$REALM" -q clientId=aegisops-admin --fields clientId --format csv --noquotes | grep -qx aegisops-admin; then
+      echo "   client 'aegisops-admin' already exists, updating its secret"
+      CID=$("$KCADM" get clients -r "$REALM" -q clientId=aegisops-admin --fields id --format csv --noquotes)
+      "$KCADM" update "clients/$CID" -r "$REALM" -s "secret=$KEYCLOAK_ADMIN_CLIENT_SECRET"
+    else
+      "$KCADM" create clients -r "$REALM" \
+        -s clientId=aegisops-admin -s name="AegisOps users screen (service account)" -s enabled=true -s publicClient=false \
+        -s "secret=$KEYCLOAK_ADMIN_CLIENT_SECRET" -s standardFlowEnabled=false -s implicitFlowEnabled=false \
+        -s directAccessGrantsEnabled=false -s serviceAccountsEnabled=true -s 'attributes."access.token.lifespan"=300'
+      echo "   created client 'aegisops-admin'"
+    fi
+    for r in view-users query-users manage-users view-realm; do
+      "$KCADM" add-roles -r "$REALM" --uusername service-account-aegisops-admin --cclientid realm-management --rolename "$r"
+    done
+    echo "   service account holds: view-users query-users manage-users view-realm"
     ;;
 
   seed-dev-users)

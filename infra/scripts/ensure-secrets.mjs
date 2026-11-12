@@ -20,6 +20,8 @@ if (!existsSync(envPath)) {
 const GENERATED = {
   GRAFANA_ADMIN_PASSWORD: () => randomBytes(24).toString('base64url'),
   GRAFANA_OAUTH_SECRET: () => randomBytes(32).toString('base64url'),
+  // Secret of the "aegisops-admin" Keycloak client the users screen acts through (it can manage every account: guard it like a master key).
+  KEYCLOAK_ADMIN_CLIENT_SECRET: () => randomBytes(32).toString('base64url'),
   AEGIS_BACKUP_DB_PASSWORD: () => randomBytes(24).toString('base64url'),
   AEGIS_PROVISIONER_DB_PASSWORD: () => randomBytes(24).toString('base64url'),
   // Encrypts every backup archive. Losing it makes all backups unreadable: back it up OFF this server.

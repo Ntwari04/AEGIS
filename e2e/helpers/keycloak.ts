@@ -47,6 +47,12 @@ export function addRole(username: string, role: string) {
   sh(`${KCADM} add-roles -r ${REALM} --config ${CFG} --uusername ${username} --rolename ${role}`);
 }
 
+/** The Keycloak id of a user, or undefined: for removing a person the test created through the dashboard. */
+export function findUserId(username: string): string | undefined {
+  login();
+  return sh(`${KCADM} get users -r ${REALM} --config ${CFG} -q username=${username} --fields id --format csv --noquotes`).trim() || undefined;
+}
+
 /** Removes the user again so repeated runs leave the realm as they found it. */
 export function deleteUser(id: string) {
   try {

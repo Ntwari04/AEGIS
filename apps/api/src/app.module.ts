@@ -6,6 +6,7 @@ import { PrismaModule } from './prisma/prisma.service';
 import { AuditModule } from './audit/audit.controller';
 import { AuditInterceptor } from './audit/audit.interceptor';
 import { UsersModule } from './users/users.service';
+import { AdminUsersModule } from './admin-users/admin-users.controller';
 import { TokenVerifier } from './auth/token-verifier.service';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { RolesGuard } from './auth/roles.guard';
@@ -36,6 +37,7 @@ class CoreModule {}
     PrismaModule,
     AuditModule,
     UsersModule,
+    AdminUsersModule,
     ProjectsModule,
     DeploymentsModule,
     SecretsModule,

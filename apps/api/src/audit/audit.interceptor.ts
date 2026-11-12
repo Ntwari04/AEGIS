@@ -31,10 +31,11 @@ export class AuditInterceptor implements NestInterceptor {
     const paramId = spec.targetParam ? req.params?.[spec.targetParam] : undefined;
     return next.handle().pipe(
       tap((body: any) => {
-        void this.audit.record({ ...base, targetId: paramId ?? body?.id, result: 'SUCCESS' });
+        // A handler may describe what it did (never a secret: the audit service strips secret-shaped keys anyway).
+        void this.audit.record({ ...base, targetId: paramId ?? body?.id, result: 'SUCCESS', metadata: req.auditMetadata });
       }),
       catchError((err) => {
-        void this.audit.record({ ...base, targetId: paramId, result: 'ERROR', metadata: { status: err?.status } });
+        void this.audit.record({ ...base, targetId: paramId, result: 'ERROR', metadata: { ...req.auditMetadata, status: err?.status } });
         return throwError(() => err);
       }),
     );
