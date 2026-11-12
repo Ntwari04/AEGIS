@@ -20,6 +20,21 @@ const uptime = (s: number | null) => {
   return `${Math.round(s / 86400)}d`;
 };
 
+type Level = 'ok' | 'warning' | 'critical';
+/** FR-MON-3 alerts at disk > 85% and memory > 90%: the meter turns critical past that and warns in the last ten points before it. */
+const level = (fraction: number, alertAt: number): Level => (fraction > alertAt ? 'critical' : fraction > alertAt - 0.1 ? 'warning' : 'ok');
+
+/** A thin bar beside a number. The number stays the real signal; the bar is for glancing. */
+function Meter({ fraction, label, alertAt }: { fraction: number | null; label: string; alertAt?: number }) {
+  if (fraction === null) return null;
+  const f = Math.min(1, Math.max(0, fraction));
+  return (
+    <span className="meter" role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(f * 100)} data-level={alertAt === undefined ? 'ok' : level(f, alertAt)}>
+      <span style={{ width: `${(f * 100).toFixed(1)}%` }} />
+    </span>
+  );
+}
+
 const STATE_LABEL: Record<ContainerState, string> = { up: 'Up', down: 'Down', restarting: 'Restarting', none: 'Not deployed', unknown: 'Unknown' };
 
 type Where = { href: string; label: string; external: boolean };
@@ -67,10 +82,15 @@ function EnvRow({ projectId, e }: { projectId: string; e: EnvironmentHealth }) {
         {e.uptimeSeconds !== null && <div className="muted">up {uptime(e.uptimeSeconds)}</div>}
         {e.restarts1h ? <div className="error">{e.restarts1h} restart(s) in 1h</div> : null}
       </td>
-      <td className="mono" data-label="CPU">{e.cpuCores === null ? '—' : `${(e.cpuCores * 100).toFixed(1)}%`}</td>
+      <td className="mono" data-label="CPU">
+        {e.cpuCores === null ? '—' : `${(e.cpuCores * 100).toFixed(1)}%`}
+        {/* No CPU limit reaches the dashboard, so the bar is a share of one core and has no alert colour. */}
+        <Meter fraction={e.cpuCores} label="CPU, share of one core" />
+      </td>
       <td className="mono" data-label="Memory">
         {bytes(e.memoryBytes)}
         {e.memoryLimitBytes ? <span className="muted"> / {bytes(e.memoryLimitBytes)}{memPct !== null && ` (${pct(memPct)})`}</span> : null}
+        <Meter fraction={memPct} label="Memory used of its limit" alertAt={0.9} />
       </td>
       <td className="mono" data-label="Storage" data-testid={`storage-${e.name}`}>{bytes(e.diskBytes)}</td>
       <td data-label="Alerts">
@@ -122,8 +142,14 @@ export default async function ProjectsPage() {
           </div>
           <div className="stats">
             <div><div className="big" data-testid="platform-containers">{data.platform.containersUp}/{data.platform.containersTotal}</div><div className="muted">platform containers up</div></div>
-            <div><div className="big">{pct(data.platform.hostMemoryUsed)}</div><div className="muted">host memory used</div></div>
-            <div><div className="big">{pct(data.platform.diskUsed)}</div><div className="muted">disk used</div></div>
+            <div>
+              <div className="big">{pct(data.platform.hostMemoryUsed)}</div><div className="muted">host memory used</div>
+              <Meter fraction={data.platform.hostMemoryUsed} label="Host memory used" alertAt={0.9} />
+            </div>
+            <div>
+              <div className="big">{pct(data.platform.diskUsed)}</div><div className="muted">disk used</div>
+              <Meter fraction={data.platform.diskUsed} label="Disk used" alertAt={0.85} />
+            </div>
             <div><div className="big" data-testid="platform-alert-count" data-bad={data.platform.alerts.length > 0}>{data.platform.alerts.length}</div><div className="muted">alerts firing</div></div>
           </div>
           {data.platform.alerts.length > 0 && (
@@ -133,19 +159,19 @@ export default async function ProjectsPage() {
       )}
 
       {data.projects.length === 0 ? (
-        <div className="card"><p className="muted" data-testid="empty">You have no projects yet.</p></div>
+        <div className="card empty-box"><p className="muted" data-testid="empty">You have no projects yet.</p></div>
       ) : (
         data.projects.map((p) => (
           <div className="card" key={p.id} data-testid={`project-${p.slug}`}>
             <div className="row">
               <div>
-                <Link href={`/projects/${p.id}`}><strong>{p.name}</strong></Link>{' '}
+                <Link href={`/projects/${p.id}`}><strong className="project-name">{p.name}</strong></Link>{' '}
                 <span className="muted mono">{p.githubRepo ?? 'no repository'}</span>
               </div>
               {p.openAlerts > 0 && <span className="sev" data-sev="critical" data-testid={`alerts-${p.slug}`}>{p.openAlerts} open alert{p.openAlerts === 1 ? '' : 's'}</span>}
             </div>
             {p.environments.length === 0 ? (
-              <p className="muted">No environments yet.</p>
+              <div className="empty-box"><p className="muted">No environments yet.</p></div>
             ) : (
               <table className="stack">
                 <thead><tr><th>Environment</th><th>Deployment</th><th>Health</th><th>CPU</th><th>Memory</th><th>Storage</th><th>Alerts</th><th /></tr></thead>

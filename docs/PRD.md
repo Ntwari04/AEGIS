@@ -175,7 +175,7 @@ The PRD said nothing about the interface beyond the dashboard requirements above
 | **FR-UX-5** | A refused form comes back filled in; a secret shown once (an API key) is shown once and nowhere else. | Met |
 | **FR-UX-6** | Every alert on the dashboard leads to the relevant Grafana panel and to the logs (the in-app log page for people who cannot open Grafana): FR-DASH-4. | Met (checked against a live alert) |
 | **FR-UX-7** | Accessibility: operable by keyboard, labelled controls, sufficient contrast; target WCAG 2.1 AA. | **Open**: only semantic markup and keyboard-reachable controls so far; not audited |
-| **FR-UX-8** | Both colour themes (light and dark, following the system setting) are reviewed. | **Open**: the dark theme exists in the stylesheet but was reviewed in light only |
+| **FR-UX-8** | Both colour themes (light and dark, following the system setting) are reviewed. | **Partly met**: after the sidebar restyle the Projects, Infrastructure, Backups and Audit screens were rendered in both themes at 1280 px and 380 px (no sideways scroll, fonts loaded, no policy violations) and Projects and Backups were looked at; the remaining screens and a contrast measurement are not done |
 | **FR-UX-9** | Language: English only in v1. | Accepted limit |
 
 Gaps against the requirements and personas above, found in the same review and **not** fixed:
