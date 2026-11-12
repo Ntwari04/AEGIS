@@ -3,7 +3,7 @@ import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@n
 import { IsIn, IsInt, IsOptional, IsString, Length, Matches, Max, Min } from 'class-validator';
 import { Audited } from '../audit/audit.interceptor';
 import { ProjectAccess, Public, Roles } from '../auth/decorators';
-import { buildOpenApi, routesOf, schemaOf } from './openapi';
+import { buildOpenApi, routesOf, schemaOf, summaryOf } from './openapi';
 
 class CreateThingDto {
   @IsString() @Length(2, 40) @Matches(/^[a-z]+$/) name!: string;
@@ -58,6 +58,18 @@ describe('schemaOf (class-validator rules as JSON Schema)', () => {
   });
 });
 
+describe('summaryOf', () => {
+  it('reads as a verb first, for the audited routes', () => {
+    expect(summaryOf('apikey.create', 'createApiKey')).toBe('Create API key');
+    expect(summaryOf('project.member.add', 'addMember')).toBe('Add project member');
+    expect(summaryOf('backup.overwrite.request', 'overwrite')).toBe('Request backup overwrite');
+    expect(summaryOf('auth.session_revoked', 'revoke')).toBe('End my session (sign out everywhere)');
+  });
+  it('falls back to the handler name when nothing is audited', () => {
+    expect(summaryOf(undefined, 'listServers')).toBe('List servers');
+  });
+});
+
 describe('buildOpenApi', () => {
   it('turns :params into {params}, and documents every route once', () => {
     expect(Object.keys(doc.paths).sort()).toEqual(['/things', '/things/ci', '/things/hook', '/things/{projectId}']);
@@ -71,7 +83,7 @@ describe('buildOpenApi', () => {
     expect(o['x-audit-action']).toBe('thing.create');
     expect(o.security).toEqual([{ bearerAuth: [] }]);
     expect(o.description).toMatch(/Roles: platform_admin, devops_engineer/);
-    expect(o.summary).toBe('Thing create');
+    expect(o.summary).toBe('Create thing');
   });
 
   it('describes the path parameter, the body (with required fields) and a header', () => {

@@ -1,4 +1,5 @@
 import { api } from '@/lib/api';
+import { Time } from '@/app/time';
 import { revokeApiKey } from './api-keys-actions';
 import { NewKeyForm } from './new-key-form';
 
@@ -8,19 +9,19 @@ type Key = { id: string; name: string; prefix: string; scopes: string[]; created
 export async function ApiKeysCard({ projectId }: { projectId: string }) {
   const keys = await api<Key[]>(`/projects/${encodeURIComponent(projectId)}/api-keys`).catch(() => [] as Key[]);
   return (
-    <div className="card" data-testid="api-keys-card">
+    <div className="card" id="api-keys" data-testid="api-keys-card">
       <strong>API keys</strong>{' '}
       <span className="muted">(let your CI trigger a deployment of this project. Stored only as a hash; revoke one the moment it leaks or its owner leaves.)</span>
       {keys.length === 0 ? <p className="muted">No keys yet.</p> : (
-        <table data-testid="api-keys-table">
+        <table className="stack" data-testid="api-keys-table">
           <thead><tr><th>Name</th><th>Starts with</th><th>Can</th><th>Last used</th><th /></tr></thead>
           <tbody>
             {keys.map((k) => (
               <tr key={k.id} data-testid={`api-key-${k.name}`}>
-                <td>{k.name}</td>
-                <td className="mono">{k.prefix}…</td>
-                <td className="muted">{k.scopes.join(', ')}</td>
-                <td className="muted">{k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : 'never'}</td>
+                <td data-label="Name">{k.name}</td>
+                <td className="mono" data-label="Starts with">{k.prefix}…</td>
+                <td className="muted" data-label="Can">{k.scopes.join(', ')}</td>
+                <td className="muted" data-label="Last used">{k.lastUsedAt ? <Time iso={k.lastUsedAt} /> : 'never'}</td>
                 <td>
                   {k.revokedAt
                     ? <span className="muted">revoked</span>

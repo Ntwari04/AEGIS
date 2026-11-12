@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { api, ApiError } from '@/lib/api';
+import { Time } from '@/app/time';
 import { currentRoles, isPrivileged } from '@/lib/permissions';
 
 type Backup = { id: string; kind: string; status: string; sizeBytes: number | null; startedAt: string; finishedAt: string | null; error: string | null; expired: boolean };
@@ -70,13 +71,13 @@ export default async function DatabasePage({ params, searchParams }: { params: P
         </div>
         <p className="note">Nightly backups run automatically (encrypted, stored off this server). Manual backups are kept 30 days.</p>
         {data.backups.length === 0 ? <p className="muted">No backups yet.</p> : (
-          <table data-testid="backup-history">
+          <table className="stack" data-testid="backup-history">
             <thead><tr><th>When</th><th>Kind</th><th>Status</th><th>Size</th><th /></tr></thead>
             <tbody>
               {data.backups.map((b) => (
                 <tr key={b.id}>
-                  <td>{new Date(b.startedAt).toLocaleString()}</td>
-                  <td className="muted">{b.kind}</td>
+                  <td data-label="When"><Time iso={b.startedAt} /></td>
+                  <td className="muted" data-label="Kind">{b.kind}</td>
                   <td>
                     <span className="status" data-status={b.status}>{b.status}</span>
                     {b.expired && <span className="muted"> expired</span>}
@@ -116,17 +117,17 @@ export default async function DatabasePage({ params, searchParams }: { params: P
       <div className="card">
         <strong>Restores</strong>
         {data.restores.length === 0 ? <p className="muted">No restores yet.</p> : (
-          <table data-testid="restore-history">
+          <table className="stack" data-testid="restore-history">
             <thead><tr><th>When</th><th>Kind</th><th>Status</th><th>Into</th><th>Took</th><th>Integrity</th></tr></thead>
             <tbody>
               {data.restores.map((r) => (
                 <tr key={r.id}>
-                  <td>{new Date(r.startedAt).toLocaleString()}</td>
-                  <td className="muted">{r.kind}</td>
+                  <td data-label="When"><Time iso={r.startedAt} /></td>
+                  <td className="muted" data-label="Kind">{r.kind}</td>
                   <td><span className="status" data-status={r.status}>{r.status}</span>{r.error && <div className="error mono">{r.error}</div>}</td>
-                  <td className="mono">{r.integrity?.previousDatabase ? `${db.name} (old: ${r.integrity.previousDatabase})` : r.targetDatabase}</td>
-                  <td className="mono">{dur(r.durationMs)}</td>
-                  <td>{r.integrity ? (r.integrity.ok ? <span className="ok">verified: {r.integrity.tables} tables, {r.integrity.rows} rows</span> : <span className="error">mismatch</span>) : '—'}</td>
+                  <td className="mono" data-label="Into">{r.integrity?.previousDatabase ? `${db.name} (old: ${r.integrity.previousDatabase})` : r.targetDatabase}</td>
+                  <td className="mono" data-label="Took">{dur(r.durationMs)}</td>
+                  <td data-label="Integrity">{r.integrity ? (r.integrity.ok ? <span className="ok">verified: {r.integrity.tables} tables, {r.integrity.rows} rows</span> : <span className="error">mismatch</span>) : '—'}</td>
                 </tr>
               ))}
             </tbody>

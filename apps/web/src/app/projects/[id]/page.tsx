@@ -3,6 +3,7 @@ import { revalidatePath } from 'next/cache';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { canDeploy, canManageEnvironments, currentRoles, isPrivileged } from '@/lib/permissions';
+import { Time } from '@/app/time';
 import { ApiKeysCard } from './api-keys-card';
 import { DatabasesCard } from './databases-card';
 import type { DeploymentDto, EnvironmentDto, ProjectDto } from '@aegisops/shared-types';
@@ -182,13 +183,17 @@ export default async function ProjectDetail({
       {anyInFlight && <meta httpEquiv="refresh" content="4" />}
       <h1 data-testid="project-name">{p.name}</h1>
       <p className="muted">{p.description ?? 'No description.'}</p>
+      <nav className="jump" aria-label="On this page">
+        <a href="#environments">Environments</a><a href="#databases">Databases</a><a href="#members">Members</a>
+        {!roles.includes('auditor') && <a href="#api-keys">API keys</a>}
+      </nav>
       {error && <p className="error" data-testid="page-error">{error}</p>}
       <div className="card">
         <strong>Repository</strong>
         <p>{p.githubRepo ?? <span className="muted">Not connected yet</span>}</p>
       </div>
 
-      <div className="card">
+      <div className="card" id="environments">
         <strong>Environments</strong>
         {p.environments.length === 0 && <p className="muted">None yet. Add one below.</p>}
         {p.environments.map((e) => {
@@ -226,18 +231,18 @@ export default async function ProjectDetail({
               </form>
               )}
               {deployments.length > 0 && (
-                <table data-testid={`history-${e.name}`}>
+                <table className="stack" data-testid={`history-${e.name}`}>
                   <thead><tr><th>Status</th><th>Commit</th><th>Source</th><th>Started</th><th /></tr></thead>
                   <tbody>
                     {deployments.map((d) => (
                       <tr key={d.id}>
-                        <td>
+                        <td data-label="Status">
                           <span className="status" data-status={d.status}>{d.status}</span>
                           {d.failureReason && <div className="error mono">{d.failureReason}</div>}
                         </td>
-                        <td className="mono">{(d.commitSha ?? '').slice(0, 7) || '—'}</td>
-                        <td className="muted">{d.triggerSource}</td>
-                        <td className="muted">{new Date(d.startedAt).toLocaleString()}</td>
+                        <td className="mono" data-label="Commit">{(d.commitSha ?? '').slice(0, 7) || '—'}</td>
+                        <td className="muted" data-label="Source">{d.triggerSource}</td>
+                        <td className="muted" data-label="Started"><Time iso={d.startedAt} /></td>
                         <td>
                           <Link href={`/projects/${id}/deployments/${d.id}?env=${e.id}`}>Logs</Link>
                           {canDeploy(roles, e.isProduction) && d.status === 'SUCCESS' && d.id !== lastGood?.id && (
@@ -259,12 +264,12 @@ export default async function ProjectDetail({
                     <strong>Secrets</strong> <span className="muted">(environment variables; values are write-only and encrypted at rest)</span>
                     {!sec.configured && <p className="error">Secret storage is not configured on this server (SECRETS_ENCRYPTION_KEY).</p>}
                     {sec.items.length === 0 ? <p className="muted">None.</p> : (
-                      <table>
+                      <table className="stack">
                         <tbody>
                           {sec.items.map((s) => (
                             <tr key={s.name}>
-                              <td className="mono">{s.name}</td>
-                              <td className="muted">set {new Date(s.updatedAt).toLocaleString()}</td>
+                              <td className="mono" data-label="Name">{s.name}</td>
+                              <td className="muted" data-label="Set"><Time iso={s.updatedAt} /></td>
                               <td>{mayWrite && <form action={deleteSecret.bind(null, id, e.id, s.name)}><button className="link">Delete</button></form>}</td>
                             </tr>
                           ))}
@@ -290,8 +295,9 @@ export default async function ProjectDetail({
       <DatabasesCard projectId={id} environments={p.environments} roles={roles} />
 
       {canManageEnvironments(roles) && (
-      <form action={createEnvironment.bind(null, id)} className="card">
-        <strong>Add environment</strong>
+      <details className="card fold" open={p.environments.length === 0}>
+      <summary>Add an environment</summary>
+      <form action={createEnvironment.bind(null, id)}>
         <div className="grid2">
           <div>
             <label htmlFor="env-name">Name (e.g. staging)</label>
@@ -329,31 +335,35 @@ export default async function ProjectDetail({
         <label className="check"><input type="checkbox" name="isProduction" /> Production environment</label>
         <button data-testid="add-environment">Add environment</button>
       </form>
+      </details>
       )}
 
-      <div className="card" data-testid="members-card">
+      <div className="card" id="members" data-testid="members-card">
         <strong>Members</strong>{' '}
         <span className="muted">(who can see this project and deploy to it; a person must have signed in once before they can be added)</span>
-        <table data-testid="members-table">
+        <table data-testid="members-table" className="stack">
           <tbody>
             {p.members.map((m) => (
               <tr key={m.userId} data-testid={`member-${m.user.username}`}>
-                <td>{m.user.username}</td>
-                <td className="muted">{m.role}</td>
+                <td data-label="Person">{m.user.username}</td>
+                <td className="muted" data-label="Role">{m.role}</td>
                 <td>{isPrivileged(roles) && <form action={removeMember.bind(null, id, m.userId)}><button className="link" data-testid={`remove-${m.user.username}`}>Remove</button></form>}</td>
               </tr>
             ))}
           </tbody>
         </table>
         {isPrivileged(roles) && (
-          <form action={addMember.bind(null, id)} className="inline" style={{ marginTop: 12 }}>
-            <div><label htmlFor="member-username">Username</label><input id="member-username" name="username" required maxLength={100} autoComplete="off" /></div>
-            <div>
-              <label htmlFor="member-role">Role in this project</label>
-              <select id="member-role" name="role" defaultValue="MEMBER"><option value="MEMBER">Member</option><option value="OWNER">Owner (can manage members)</option></select>
-            </div>
-            <button data-testid="add-member">Add member</button>
-          </form>
+          <details className="fold" open={p.members.length === 0}>
+            <summary>Add a member</summary>
+            <form action={addMember.bind(null, id)} className="inline">
+              <div><label htmlFor="member-username">Username</label><input id="member-username" name="username" required maxLength={100} autoComplete="off" /></div>
+              <div>
+                <label htmlFor="member-role">Role in this project</label>
+                <select id="member-role" name="role" defaultValue="MEMBER"><option value="MEMBER">Member</option><option value="OWNER">Owner (can manage members)</option></select>
+              </div>
+              <button data-testid="add-member">Add member</button>
+            </form>
+          </details>
         )}
       </div>
 

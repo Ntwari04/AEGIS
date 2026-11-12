@@ -25,6 +25,8 @@ function rules(s: Schema | undefined): string {
 }
 
 const METHODS = ['get', 'post', 'put', 'patch', 'delete'];
+/** Group names as a person would say them; the document itself keeps the controller names. */
+const TAG_LABEL: Record<string, string> = { Ci: 'CI deployments (API key)', Data: 'Databases and backups', Docs: 'This reference', Health: 'Health check', Infra: 'Infrastructure and logs', Users: 'Current user', Webhooks: 'GitHub webhook', Audit: 'Audit log', Deployments: 'Deployments', Projects: 'Projects, members and keys' };
 
 /** PRD 10: the API reference, rendered from the generated OpenAPI document. Signed-in users only (the middleware and the API both enforce it). */
 export default async function ApiDocsPage() {
@@ -48,7 +50,7 @@ export default async function ApiDocsPage() {
 
       {[...byTag.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([tag, list]) => (
         <div className="card" key={tag} data-testid={`api-tag-${tag}`}>
-          <strong>{tag}</strong>
+          <strong>{TAG_LABEL[tag] ?? tag}</strong>
           {list.map(({ path, method, op }) => (
             <details key={`${method} ${path}`} className="operation" data-testid={`api-op-${method}-${path}`}>
               <summary>

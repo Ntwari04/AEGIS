@@ -57,6 +57,22 @@ export function schemaOf(cls: Ctor): { schema: Json; required: string[] } {
 }
 
 const humanize = (name: string) => name.replace(/([A-Z])/g, ' $1').toLowerCase().replace(/^./, (c) => c.toUpperCase());
+
+const NOUNS: Record<string, string> = { apikey: 'API key', api_key: 'API key', ci: 'CI' };
+const cap = (s: string) => s.replace(/^./, (c) => c.toUpperCase());
+
+/**
+ * What a person reads in the list: "Create API key", "Add project member". Audited routes have a dotted action (`project.member.add`)
+ * whose last word is the verb, so it is turned around; anything else falls back to the handler's name.
+ */
+export function summaryOf(auditAction: string | undefined, handler: string): string {
+  if (!auditAction) return humanize(handler);
+  if (auditAction === 'auth.session_revoked') return 'End my session (sign out everywhere)';
+  const words = auditAction.split('.');
+  const verb = words[words.length - 1];
+  const noun = words.slice(0, -1).map((w) => NOUNS[w] ?? w.replace(/_/g, ' ')).join(' ');
+  return cap(`${verb} ${noun}`);
+}
 const joinPath = (...parts: string[]) => '/' + parts.map((p) => p.replace(/^\/|\/$/g, '')).filter(Boolean).join('/');
 const toOpenApiPath = (p: string) => p.replace(/:([A-Za-z0-9_]+)/g, '{$1}');
 
@@ -128,7 +144,7 @@ export function buildOpenApi(controllers: Ctor[], opts: { version?: string } = {
       const operation: Json = {
         operationId: `${r.controller.replace(/Controller$/, '')}_${r.handler}`,
         tags: [tag],
-        summary: audit ? humanize(audit.action.replace(/\./g, ' ')) : humanize(r.handler),
+        summary: summaryOf(audit?.action, r.handler),
         description: notes.join(' '),
         'x-roles': r.public ? [] : r.roles,
         ...(access ? { 'x-project-access': access } : {}),

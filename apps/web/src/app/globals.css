@@ -32,7 +32,8 @@ button.link { background:none; color:var(--accent); margin:0; padding:0; }
 .status[data-status=PENDING], .status[data-status=RUNNING] { color:var(--warn); }
 .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 16px; }
 .inline { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end; }
-.inline input { flex:1; min-width:140px; }
+.inline input:not([type=checkbox]) { flex:1; min-width:140px; }
+.inline input[type=checkbox], .check input { flex:none; width:auto; min-width:0; }
 .scopes { display:flex; flex-direction:column; gap:2px; }
 .scopes .check { margin-top:0; }
 .cell-wrap { word-break:break-word; }
@@ -79,3 +80,59 @@ select { width:100%; padding:8px 10px; background:var(--bg); color:var(--fg); bo
 
 /* Live logs */
 .live-box { margin:12px 0 0; max-height:360px; min-height:120px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px; }
+
+/* Phones: a table marked .stack becomes one card per row, each cell labelled by its column, so nothing is scrolled out of sight. */
+@media (max-width: 720px) {
+  table.stack, table.stack tbody { display:block; overflow:visible; white-space:normal; }
+  table.stack thead { display:none; }
+  table.stack tr { display:block; border:1px solid var(--line); border-radius:8px; padding:6px 12px; margin-bottom:10px; }
+  table.stack td { display:flex; justify-content:space-between; align-items:baseline; gap:16px; border:0; padding:4px 0; text-align:right; overflow-wrap:anywhere; }
+  table.stack td::before { content:attr(data-label); flex:none; color:var(--muted); font-size:13px; text-align:left; }
+  table.stack td:not([data-label])::before { display:none; }
+  table.stack td:empty { display:none; }
+}
+
+/* Folded forms and the jump links of a long page */
+.fold > summary { cursor:pointer; color:var(--accent); font-weight:600; margin:12px 0 4px; }
+.card.fold > summary { margin:0; }
+.card.fold[open] > summary { margin-bottom:8px; }
+.jump { display:flex; flex-wrap:wrap; gap:4px 16px; margin:0 0 16px; font-size:14px; }
+.cell-wrap { overflow-wrap:anywhere; }
+html { scroll-behavior:smooth; scroll-padding-top:16px; }
+
+/* Key / value tables (a label and its value): on a phone they wrap instead of scrolling sideways. */
+@media (max-width: 720px) {
+  table.kv { display:table; white-space:normal; }
+  table.kv td, table.kv th { overflow-wrap:anywhere; }
+}
+
+h2 { font-size:17px; margin:24px 0 8px; }
+.center h1 { margin-bottom:8px; }
+
+/* Long API paths must wrap on a phone instead of pushing the page wider than the screen. */
+.operation summary > * { min-width:0; overflow-wrap:anywhere; }
+
+/* A status pill is never squeezed or broken across lines; text next to it (a failure reason) goes on its own line beneath. */
+.status, .state, .sev { white-space:nowrap; }
+.inline > button.link { align-self:center; margin-top:0; }
+@media (max-width: 720px) {
+  table.stack td { flex-wrap:wrap; }
+  table.stack td .error { flex:1 1 100%; text-align:left; }
+  /* The least useful cells of a long list are left out of the card, so a page of 50 entries is not 12,000 pixels tall. */
+  table.stack td.hide-sm { display:none; }
+}
+
+/* A long list of events (the audit log) as compact cards: time and result on one line, then what happened, who, and the details. */
+@media (max-width: 720px) {
+  table.stack.compact tr { display:grid; grid-template-columns:1fr auto; gap:2px 12px; padding:8px 12px; }
+  table.stack.compact td { display:block; padding:0; text-align:left; }
+  table.stack.compact td::before { display:none; }
+  table.stack.compact td[data-label="When"] { grid-column:1; grid-row:1; font-size:13px; }
+  table.stack.compact td[data-label="Result"] { grid-column:2; grid-row:1; justify-self:end; }
+  table.stack.compact td[data-label="Action"] { grid-column:1 / -1; grid-row:2; }
+  table.stack.compact td[data-label="Who"] { grid-column:1 / -1; grid-row:3; }
+  table.stack.compact td[data-label="Details"] { grid-column:1 / -1; grid-row:4; font-size:12px; }
+}
+@media (max-width: 720px) {
+  table.stack.compact td.hide-sm { display:none; }
+}

@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
+import { Time } from '@/app/time';
 import type { DeploymentDto } from '@aegisops/shared-types';
 
 type Detail = DeploymentDto & { logs: string; containerName: string | null; imageRef: string | null };
@@ -33,12 +34,12 @@ export default async function DeploymentPage({
           <span className="muted">via {d.triggerSource}{d.restoredFromId ? ' (rollback)' : ''}</span>
         </p>
         {d.failureReason && <p className="error mono" data-testid="deployment-failure">{d.failureReason}</p>}
-        <table>
+        <table className="kv">
           <tbody>
             <tr><th>Image</th><td className="mono">{d.imageRef ?? '—'}</td></tr>
             <tr><th>Container</th><td className="mono">{d.containerName ?? '—'}</td></tr>
-            <tr><th>Started</th><td>{new Date(d.startedAt).toLocaleString()}</td></tr>
-            <tr><th>Finished</th><td>{d.finishedAt ? new Date(d.finishedAt).toLocaleString() : '—'}</td></tr>
+            <tr><th>Started</th><td><Time iso={d.startedAt} seconds /></td></tr>
+            <tr><th>Finished</th><td>{d.finishedAt ? <Time iso={d.finishedAt} seconds /> : '—'}</td></tr>
           </tbody>
         </table>
       </div>

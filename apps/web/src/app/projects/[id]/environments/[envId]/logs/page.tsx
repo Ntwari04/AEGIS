@@ -25,7 +25,8 @@ export default async function LogsPage({
     <>
       <p><Link href={`/projects/${id}`}>← Back to project</Link></p>
       <h1>Logs</h1>
-      <p className="note">Follow the logs live, or search what was already written.</p>
+      <LiveLogs projectId={id} envId={envId} contains={q.slice(0, 100)} />
+      <h2>Search past logs</h2>
       <form method="get" className="inline card">
         <div><label htmlFor="q">Contains</label><input id="q" name="q" defaultValue={q} maxLength={100} placeholder="error" /></div>
         <div>
@@ -36,10 +37,9 @@ export default async function LogsPage({
         </div>
         <button data-testid="search-logs">Search</button>
       </form>
-      <LiveLogs projectId={id} envId={envId} contains={q.slice(0, 100)} />
       {problem && <p className="error" data-testid="logs-problem">{problem}</p>}
       <div className="card">
-        {lines.length === 0 && !problem ? <p className="muted" data-testid="no-logs">No log lines in this period.</p> : (
+        {lines.length === 0 && !problem ? <p className="muted" data-testid="no-logs">No log lines{q ? ` containing “${q}”` : ''} in this period. Try a longer period{q ? ' or a different word' : ''}.</p> : (
           // Log text is rendered as TEXT, never as HTML.
           <pre className="mono" data-testid="log-lines" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', margin: 0 }}>
             {lines.map((l) => `${l.ts}  ${l.line}`).join('\n')}

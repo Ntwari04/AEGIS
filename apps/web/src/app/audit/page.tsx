@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { api } from '@/lib/api';
+import { Time } from '@/app/time';
 import { auditQuery, pickFilters, type AuditFilters } from '@/lib/audit-filters';
 import { currentRoles } from '@/lib/permissions';
 
@@ -76,18 +77,18 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
       {data.items.length === 0 ? (
         <div className="card"><p className="muted" data-testid="audit-empty">Nothing matches these filters.</p></div>
       ) : (
-        <table data-testid="audit-table">
+        <table className="stack compact" data-testid="audit-table">
           <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Result</th><th>Target</th><th>From</th><th>Details</th></tr></thead>
           <tbody>
             {data.items.map((e) => (
               <tr key={e.id} data-testid="audit-row">
-                <td className="muted">{new Date(e.createdAt).toLocaleString()}</td>
-                <td className="cell-wrap">{e.actorName ? shorten(e.actorName) : <span className="muted">system</span>}</td>
-                <td className="mono">{e.action}</td>
-                <td><span className="status" data-status={STATUS[e.result]}>{e.result}</span></td>
-                <td className="mono">{e.targetType ? `${e.targetType}${e.targetId ? ` ${e.targetId.slice(0, 8)}` : ''}` : ''}</td>
-                <td className="mono muted">{e.sourceIp ?? ''}</td>
-                <td className="mono muted cell-wrap">{details(e.metadata)}</td>
+                <td className="muted" data-label="When"><Time iso={e.createdAt} seconds /></td>
+                <td className="cell-wrap" data-label="Who">{e.actorName ? shorten(e.actorName) : <span className="muted">system</span>}</td>
+                <td className="mono" data-label="Action">{e.action}</td>
+                <td data-label="Result"><span className="status" data-status={STATUS[e.result]}>{e.result}</span></td>
+                <td className="mono hide-sm" data-label="Target">{e.targetType ? `${e.targetType}${e.targetId ? ` ${e.targetId.slice(0, 8)}` : ''}` : ''}</td>
+                <td className="mono muted hide-sm" data-label="From">{e.sourceIp ?? ''}</td>
+                <td className="mono muted cell-wrap" data-label="Details">{details(e.metadata)}</td>
               </tr>
             ))}
           </tbody>

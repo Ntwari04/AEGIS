@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { auth } from '@/auth';
 import { api } from '@/lib/api';
+import { Time } from '@/app/time';
 import type { AlertDto, ContainerState, EnvironmentHealth, MonitoringOverview } from '@aegisops/shared-types';
 
 const bytes = (n: number | null) => {
@@ -34,10 +35,10 @@ function EnvRow({ projectId, e }: { projectId: string; e: EnvironmentHealth }) {
   const memPct = e.memoryBytes !== null && e.memoryLimitBytes ? e.memoryBytes / e.memoryLimitBytes : null;
   return (
     <tr data-testid={`health-${e.name}`}>
-      <td>
+      <td data-label="Environment">
         <Link href={`/projects/${projectId}`}>{e.name}</Link> {e.isProduction && <span className="role">production</span>}
       </td>
-      <td>
+      <td data-label="Deployment">
         {e.deployment ? (
           <>
             <span className="status" data-status={e.deployment.status}>{e.deployment.status}</span>
@@ -45,17 +46,17 @@ function EnvRow({ projectId, e }: { projectId: string; e: EnvironmentHealth }) {
           </>
         ) : <span className="muted">—</span>}
       </td>
-      <td>
+      <td data-label="Health">
         <span className="state" data-state={e.state} data-testid={`state-${e.name}`}>{STATE_LABEL[e.state]}</span>
         {e.uptimeSeconds !== null && <div className="muted">up {uptime(e.uptimeSeconds)}</div>}
         {e.restarts1h ? <div className="error">{e.restarts1h} restart(s) in 1h</div> : null}
       </td>
-      <td className="mono">{e.cpuCores === null ? '—' : `${(e.cpuCores * 100).toFixed(1)}%`}</td>
-      <td className="mono">
+      <td className="mono" data-label="CPU">{e.cpuCores === null ? '—' : `${(e.cpuCores * 100).toFixed(1)}%`}</td>
+      <td className="mono" data-label="Memory">
         {bytes(e.memoryBytes)}
         {e.memoryLimitBytes ? <span className="muted"> / {bytes(e.memoryLimitBytes)}{memPct !== null && ` (${pct(memPct)})`}</span> : null}
       </td>
-      <td><Alerts alerts={e.alerts} /></td>
+      <td data-label="Alerts"><Alerts alerts={e.alerts} /></td>
       <td>
         {e.links ? (
           <span className="links">
@@ -121,7 +122,7 @@ export default async function ProjectsPage() {
             {p.environments.length === 0 ? (
               <p className="muted">No environments yet.</p>
             ) : (
-              <table>
+              <table className="stack">
                 <thead><tr><th>Environment</th><th>Deployment</th><th>Health</th><th>CPU</th><th>Memory</th><th>Alerts</th><th /></tr></thead>
                 <tbody>{p.environments.map((e) => <EnvRow key={e.id} projectId={p.id} e={e} />)}</tbody>
               </table>
@@ -129,7 +130,7 @@ export default async function ProjectsPage() {
           </div>
         ))
       )}
-      <p className="muted">Updated {new Date(data.generatedAt).toLocaleTimeString()}</p>
+      <p className="muted">Updated <Time iso={data.generatedAt} timeOnly /></p>
     </>
   );
 }

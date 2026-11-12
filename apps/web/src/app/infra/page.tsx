@@ -72,14 +72,14 @@ export default async function InfraPage({ searchParams }: { searchParams: Promis
             </div>
           </div>
           {s.containers.length > 0 && (
-            <table>
+            <table className="stack">
               <thead><tr><th>Container</th><th>Belongs to</th><th>State</th></tr></thead>
               <tbody>
                 {s.containers.sort((a, b) => a.name.localeCompare(b.name)).map((c) => (
                   <tr key={c.name}>
-                    <td className="mono">{c.name}</td>
-                    <td className="muted">{c.project ? `${c.project}/${c.environment}` : 'platform'}</td>
-                    <td><span className="state" data-state={c.up ? 'up' : 'down'}>{c.up ? 'Up' : 'Down'}</span></td>
+                    <td className="mono" data-label="Container">{c.name}</td>
+                    <td className="muted" data-label="Belongs to">{c.project ? `${c.project}/${c.environment}` : 'platform'}</td>
+                    <td data-label="State"><span className="state" data-state={c.up ? 'up' : 'down'}>{c.up ? 'Up' : 'Down'}</span></td>
                   </tr>
                 ))}
               </tbody>

@@ -2,6 +2,7 @@ import { notFound, redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { api, ApiError } from '@/lib/api';
 import { currentRoles } from '@/lib/permissions';
+import { Time } from '@/app/time';
 
 type Backup = { id: string; target: string; kind: string; status: string; sizeBytes: number | null; startedAt: string; finishedAt: string | null; error: string | null };
 type Restore = { id: string; backupJobId: string; kind: string; status: string; targetDatabase: string; startedAt: string; durationMs: number | null; error: string | null; integrity: { ok: boolean | null; tables: number | null; rows: number | null; withinRto: boolean | null } | null };
@@ -55,7 +56,7 @@ export default async function BackupsPage({ searchParams }: { searchParams: Prom
             <strong>{label(t.target)}</strong>
             {admin && <form action={backupSystem.bind(null, t.target.replace('system:', ''))}><button className="link">Back up now</button></form>}
           </div>
-          <table>
+          <table className="kv">
             <tbody>
               <tr>
                 <th>Last backup</th>
@@ -84,16 +85,16 @@ export default async function BackupsPage({ searchParams }: { searchParams: Prom
       <div className="card">
         <strong>Recent restores and drills</strong>
         {restores.length === 0 ? <p className="muted">None yet.</p> : (
-          <table data-testid="restore-history">
+          <table className="stack" data-testid="restore-history">
             <thead><tr><th>When</th><th>Kind</th><th>Status</th><th>Took</th><th>Integrity</th></tr></thead>
             <tbody>
               {restores.map((r) => (
                 <tr key={r.id}>
-                  <td>{new Date(r.startedAt).toLocaleString()}</td>
-                  <td className="muted">{r.kind}</td>
-                  <td><span className="status" data-status={r.status}>{r.status}</span>{r.error && <div className="error mono">{r.error}</div>}</td>
-                  <td className="mono">{dur(r.durationMs)}</td>
-                  <td>{r.integrity ? (r.integrity.ok ? <span className="ok">{r.integrity.tables} tables, {r.integrity.rows} rows</span> : <span className="error">mismatch</span>) : '—'}</td>
+                  <td data-label="When"><Time iso={r.startedAt} /></td>
+                  <td className="muted" data-label="Kind">{r.kind}</td>
+                  <td data-label="Status"><span className="status" data-status={r.status}>{r.status}</span>{r.error && <div className="error mono">{r.error}</div>}</td>
+                  <td className="mono" data-label="Took">{dur(r.durationMs)}</td>
+                  <td data-label="Integrity">{r.integrity ? (r.integrity.ok ? <span className="ok">{r.integrity.tables} tables, {r.integrity.rows} rows</span> : <span className="error">mismatch</span>) : '—'}</td>
                 </tr>
               ))}
             </tbody>

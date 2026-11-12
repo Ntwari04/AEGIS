@@ -169,6 +169,7 @@ test.describe.serial('definition of done', () => {
 
       // Membership is what grants access (FR-IAM-4 / FR-PROJ-4): the admin adds the developer in the dashboard, and takes them out again.
       await page.goto(`/projects/${state.projectId}`);
+      await page.getByText('Add a member').click(); // the form is folded away once a project has members
       await page.locator('#member-username').fill(dev.username);
       await page.getByTestId('add-member').click();
       await expect(page.getByTestId(`member-${dev.username}`)).toBeVisible();
@@ -425,7 +426,57 @@ test.describe.serial('definition of done', () => {
     }
   });
 
-  test('15. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
+  test('15. screens read clearly: styled not-found page, labelled unambiguous times, slug suggestion, form kept on error, and nothing scrolls sideways on a phone', async () => {
+    test.setTimeout(240_000);
+
+    // A page that is not there, or not yours, looks like the rest of the app and leads somewhere.
+    await page.goto('/projects/00000000-0000-0000-0000-000000000000');
+    await expect(page.getByTestId('not-found')).toBeVisible();
+    await page.getByRole('link', { name: 'Back to projects' }).click();
+    await page.waitForURL(/\/projects$/);
+
+    // Times name their month and their zone, and the exact UTC instant is in the tooltip.
+    await page.goto('/audit');
+    const time = page.locator('time').first();
+    await expect(time).toHaveAttribute('title', /\(UTC\)$/);
+    // The month is a NAME (in the viewer's own order: "12 Nov 2026" or "Nov 12, 2026") and the zone is named, never a bare 11/12/2026.
+    await expect(time).toHaveText(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.*\b\d{4}\b/);
+    await expect(time).toHaveText(/UTC|GMT|[A-Z]{2,5}$/);
+
+    // The slug follows the name until the person writes their own, and a refused form comes back filled in.
+    await page.goto('/projects/new');
+    await page.locator('#name').fill('My Billing App');
+    await expect(page.locator('#slug')).toHaveValue('my-billing-app');
+    await page.locator('#slug').fill('custom-slug');
+    await page.locator('#name').fill('Other Name');
+    await expect(page.locator('#slug')).toHaveValue('custom-slug');
+    await page.locator('#githubRepo').fill('nobody/not-installed-' + tag);
+    await page.getByTestId('create-project').click();
+    await expect(page.getByTestId('form-error')).toBeVisible();
+    await expect(page.locator('#name')).toHaveValue('Other Name');
+    await expect(page.locator('#slug')).toHaveValue('custom-slug');
+    await expect(page.locator('#githubRepo')).toHaveValue('nobody/not-installed-' + tag);
+
+    // On a phone: no sideways scrolling anywhere, and a table row keeps its important cells on screen.
+    await page.setViewportSize({ width: 390, height: 844 });
+    try {
+      for (const url of ['/projects', `/projects/${state.projectId}`, '/audit', '/backups', '/infra', '/api/docs']) {
+        await page.goto(url);
+        await page.waitForLoadState('networkidle');
+        const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+        expect(overflow, `${url} must not scroll sideways on a phone`).toBeLessThanOrEqual(1);
+      }
+      await page.goto(`/projects/${state.projectId}`);
+      const commit = page.getByTestId('history-staging').locator('td[data-label="Commit"]').first();
+      await expect(commit).toBeVisible();
+      const box = (await commit.boundingBox())!;
+      expect(box.x + box.width).toBeLessThanOrEqual(390);
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 720 });
+    }
+  });
+
+  test('16. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
     test.setTimeout(150_000);
     await page.goto(`/projects/${state.projectId}`);
     await page.locator('#key-name').fill('e2e-ci');
