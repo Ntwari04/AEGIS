@@ -21,12 +21,26 @@ const uptime = (s: number | null) => {
 
 const STATE_LABEL: Record<ContainerState, string> = { up: 'Up', down: 'Down', restarting: 'Restarting', none: 'Not deployed', unknown: 'Unknown' };
 
-function Alerts({ alerts }: { alerts: AlertDto[] }) {
+type Where = { href: string; label: string; external: boolean };
+
+/**
+ * FR-DASH-4: an alert is never a bare notification. Its text leads to the Grafana panel for what is affected and, beside it, to the logs:
+ * Grafana's for people who can open it, the dashboard's own log page for those who cannot (developers).
+ */
+function Alerts({ alerts, panel, logs }: { alerts: AlertDto[]; panel?: Where; logs?: Where }) {
   if (alerts.length === 0) return <span className="muted">none</span>;
+  const open = (w: Where, text: React.ReactNode, testid: string) =>
+    w.external
+      ? <a href={w.href} target="_blank" rel="noopener noreferrer" data-testid={testid}>{text}</a>
+      : <Link href={w.href} data-testid={testid}>{text}</Link>;
   return (
     <ul className="alerts" data-testid="env-alerts">
       {alerts.map((a, i) => (
-        <li key={`${a.name}-${i}`}><span className="sev" data-sev={a.severity}>{a.severity}</span> {a.summary}</li>
+        <li key={`${a.name}-${i}`}>
+          <span className="sev" data-sev={a.severity}>{a.severity}</span>{' '}
+          {panel ? open(panel, a.summary, 'alert-panel') : a.summary}
+          {logs && <> · {open(logs, logs.label, 'alert-logs')}</>}
+        </li>
       ))}
     </ul>
   );
@@ -57,7 +71,13 @@ function EnvRow({ projectId, e }: { projectId: string; e: EnvironmentHealth }) {
         {bytes(e.memoryBytes)}
         {e.memoryLimitBytes ? <span className="muted"> / {bytes(e.memoryLimitBytes)}{memPct !== null && ` (${pct(memPct)})`}</span> : null}
       </td>
-      <td data-label="Alerts"><Alerts alerts={e.alerts} /></td>
+      <td data-label="Alerts">
+        <Alerts
+          alerts={e.alerts}
+          panel={e.links ? { href: e.links.dashboard, label: 'metrics', external: true } : undefined}
+          logs={e.links ? { href: e.links.logs, label: 'logs', external: true } : { href: `/projects/${projectId}/environments/${e.id}/logs`, label: 'logs', external: false }}
+        />
+      </td>
       <td>
         {e.links ? (
           <span className="links">
@@ -104,7 +124,9 @@ export default async function ProjectsPage() {
             <div><div className="big">{pct(data.platform.diskUsed)}</div><div className="muted">disk used</div></div>
             <div><div className="big" data-testid="platform-alert-count" data-bad={data.platform.alerts.length > 0}>{data.platform.alerts.length}</div><div className="muted">alerts firing</div></div>
           </div>
-          {data.platform.alerts.length > 0 && <Alerts alerts={data.platform.alerts} />}
+          {data.platform.alerts.length > 0 && (
+            <Alerts alerts={data.platform.alerts} panel={data.platform.links ? { href: data.platform.links.dashboard, label: 'metrics', external: true } : undefined} />
+          )}
         </div>
       )}
 

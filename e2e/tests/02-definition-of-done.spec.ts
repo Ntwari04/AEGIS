@@ -498,6 +498,14 @@ test.describe.serial('definition of done', () => {
     await expect(page.locator('#member-username')).toHaveValue('half-typed-name');
     await expect(page.locator('details', { has: page.locator('#member-username') })).toHaveAttribute('open', '');
     expect(await page.locator('meta[http-equiv="refresh"]').count()).toBe(0);
+
+    // FR-DASH-4: the alert this failed deployment raises is not a bare notification; it leads to Grafana's panel and to the logs.
+    const card = page.getByTestId(`project-${slug}`);
+    await expect
+      .poll(async () => { await page.goto('/projects'); return card.getByTestId('alert-panel').count(); }, { timeout: 180_000, intervals: [5_000] })
+      .toBeGreaterThan(0);
+    expect(await card.getByTestId('alert-panel').first().getAttribute('href')).toMatch(/grafana\.[^/]+\/d\/aegisops-env\?var-project=e2e-/);
+    expect(await card.getByTestId('alert-logs').first().getAttribute('href')).toMatch(/\/explore\?/);
   });
 
   test('17. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
