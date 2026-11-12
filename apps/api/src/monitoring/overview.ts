@@ -12,6 +12,7 @@ export interface ContainerSamples {
   cpu: Sample[];
   memory: Sample[];
   memoryLimit: Sample[];
+  disk: Sample[];
   restarts1h: Sample[];
   started: Sample[];
 }
@@ -64,6 +65,7 @@ export function buildProjects(input: OverviewInput): ProjectOverview[] {
         cpuCores: running && samples && container ? byName(samples.cpu, container) : null,
         memoryBytes: running && samples && container ? byName(samples.memory, container) : null,
         memoryLimitBytes: running && samples && container ? byName(samples.memoryLimit, container) : null,
+        diskBytes: samples && container ? byName(samples.disk, container) : null,
         restarts1h: samples && container ? byName(samples.restarts1h, container) : null,
         uptimeSeconds: running && started ? Math.max(0, Math.round(input.nowSeconds - started)) : null,
         alerts,

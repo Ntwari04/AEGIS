@@ -33,16 +33,17 @@ export class MonitoringClient {
   }
 
   async containerSamples(): Promise<ContainerSamples> {
-    const [up, restarting, cpu, memory, memoryLimit, restarts1h, started] = await Promise.all([
+    const [up, restarting, cpu, memory, memoryLimit, disk, restarts1h, started] = await Promise.all([
       this.query('aegisops_container_up{project!=""}'),
       this.query('aegisops_container_restarting{project!=""}'),
       this.query('sum by (project, environment, name)(rate(aegisops_container_cpu_seconds_total{project!=""}[2m]))'),
       this.query('aegisops_container_memory_bytes{project!=""}'),
       this.query('aegisops_container_memory_limit_bytes{project!=""}'),
+      this.query('aegisops_container_disk_bytes{project!=""}'),
       this.query('sum by (project, environment, name)(increase(aegisops_container_restart_count{project!=""}[1h]))'),
       this.query('aegisops_container_started_timestamp_seconds{project!=""}'),
     ]);
-    return { up, restarting, cpu, memory, memoryLimit, restarts1h, started };
+    return { up, restarting, cpu, memory, memoryLimit, disk, restarts1h, started };
   }
 
   async platformSummary(): Promise<Omit<PlatformSummary, 'alerts' | 'links'>> {

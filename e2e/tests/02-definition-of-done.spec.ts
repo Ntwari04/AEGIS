@@ -91,6 +91,8 @@ test.describe.serial('definition of done', () => {
     await expect(row.locator('td').nth(3)).not.toHaveText('—', { timeout: 90_000 });
     await expect(row.locator('td').nth(4)).toContainText(/MB|MiB|KB|GB/i, { timeout: 90_000 });
     await expect(row.locator('td').nth(4)).toContainText('256');
+    // FR-DASH-1: storage per environment (what the container has written to its own filesystem).
+    await expect(row.getByTestId('storage-staging')).toHaveText(/^[\d.]+ (KB|MB|GB)$/, { timeout: 90_000 });
 
     const links = row.locator('.links a');
     await expect(links).toHaveCount(2);

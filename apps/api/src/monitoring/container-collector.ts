@@ -4,7 +4,8 @@ import { Gauge, Registry } from 'prom-client';
 export interface DockerLike {
   listContainers(opts: { all: boolean; filters?: Record<string, string[]> }): Promise<{ Id: string; Names: string[]; State: string; Labels?: Record<string, string> }[]>;
   getContainer(id: string): {
-    inspect(): Promise<{
+    inspect(opts?: { size?: boolean }): Promise<{
+      SizeRw?: number;
       RestartCount?: number;
       HostConfig?: { Memory?: number };
       State?: { Running?: boolean; Restarting?: boolean; StartedAt?: string; Health?: { Status?: string } };
@@ -18,7 +19,8 @@ export interface DockerLike {
 }
 
 const LABELS = ['name', 'project', 'environment'] as const;
-const HEALTH_STATES = ['healthy', 'unhealthy', 'starting', 'none'] as const;
+const SIZE_EVERY_MS = 5 * 60_000;
+const HEALTH_STATES =['healthy', 'unhealthy', 'starting', 'none'] as const;
 
 /**
  * Container metrics straight from the Docker API (FR-MON-2, FR-DASH-1), read through the read-only docker-proxy.
@@ -35,6 +37,9 @@ export class ContainerCollector {
   private readonly cpu: Gauge<string>;
   private readonly mem: Gauge<string>;
   private readonly memLimit: Gauge<string>;
+  private readonly disk: Gauge<string>;
+  /** Disk size is costly for Docker to compute (it walks the layer), so each container is measured at most every SIZE_EVERY_MS. */
+  private readonly sizes = new Map<string, { at: number; bytes: number }>();
   private readonly rx: Gauge<string>;
   private readonly tx: Gauge<string>;
   private readonly lastRefresh: Gauge<string>;
@@ -53,6 +58,7 @@ export class ContainerCollector {
     this.cpu = g('aegisops_container_cpu_seconds_total', 'CPU time consumed (use rate() for cores in use)');
     this.mem = g('aegisops_container_memory_bytes', 'Memory in use (excluding reclaimable page cache)');
     this.memLimit = g('aegisops_container_memory_limit_bytes', 'Configured memory limit; the series is absent when no limit is set');
+    this.disk = g('aegisops_container_disk_bytes', 'Data the container has written to its own filesystem layer (excludes the image and volumes); refreshed every few minutes');
     this.rx = g('aegisops_container_network_receive_bytes_total', 'Bytes received');
     this.tx = g('aegisops_container_network_transmit_bytes_total', 'Bytes transmitted');
     this.lastRefresh = g('aegisops_container_exporter_last_refresh_timestamp_seconds', 'When the container list was last read successfully', []);
@@ -76,7 +82,8 @@ export class ContainerCollector {
           const info = await withTimeout(ref.inspect(), 5000);
           const running = c.State === 'running' || info.State?.Running === true;
           const stats = running ? await withTimeout(ref.stats({ stream: false }), 8000) : undefined;
-          return { labels, c, info, running, stats };
+          const diskBytes = await this.diskSize(c.Id, ref);
+          return { labels, c, info, running, stats, diskBytes };
         } catch {
           errors++;
           return undefined;
@@ -84,10 +91,13 @@ export class ContainerCollector {
       }),
     );
 
-    for (const g of [this.up, this.restarting, this.restartCount, this.started, this.health, this.cpu, this.mem, this.memLimit, this.rx, this.tx]) g.reset();
+    for (const g of [this.up, this.restarting, this.restartCount, this.started, this.health, this.cpu, this.mem, this.memLimit, this.disk, this.rx, this.tx]) g.reset();
+    const seen = new Set(list.map((c) => c.Id));
+    for (const id of this.sizes.keys()) if (!seen.has(id)) this.sizes.delete(id);
     for (const r of rows) {
       if (!r) continue;
-      const { labels, info, running, stats } = r;
+      const { labels, info, running, stats, diskBytes } = r;
+      if (diskBytes !== undefined) this.disk.set(labels, diskBytes);
       this.up.set(labels, running ? 1 : 0);
       this.restarting.set(labels, info.State?.Restarting || r.c.State === 'restarting' ? 1 : 0);
       this.restartCount.set(labels, info.RestartCount ?? 0);
@@ -115,6 +125,21 @@ export class ContainerCollector {
     }
     this.refreshErrors.set(errors);
     this.lastRefresh.set(this.now() / 1000);
+  }
+
+  /** Latest known writable-layer size; a failed or slow measurement keeps the previous value rather than dropping the series. */
+  private async diskSize(id: string, ref: ReturnType<DockerLike['getContainer']>): Promise<number | undefined> {
+    const cached = this.sizes.get(id);
+    const now = this.now();
+    if (cached && now - cached.at < SIZE_EVERY_MS) return cached.bytes;
+    try {
+      const withSize = await withTimeout(ref.inspect({ size: true }), 20_000);
+      if (typeof withSize.SizeRw === 'number') {
+        this.sizes.set(id, { at: now, bytes: withSize.SizeRw });
+        return withSize.SizeRw;
+      }
+    } catch { /* keep the old value */ }
+    return cached?.bytes;
   }
 
   metrics() {

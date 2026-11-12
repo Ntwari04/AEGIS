@@ -8,6 +8,7 @@ import type { AlertDto, ContainerState, EnvironmentHealth, MonitoringOverview } 
 const bytes = (n: number | null) => {
   if (n === null) return '—';
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
+  if (n < 1024 ** 2) return `${Math.max(1, Math.round(n / 1024))} KB`;
   return `${Math.round(n / 1024 ** 2)} MB`;
 };
 const pct = (n: number | null) => (n === null ? '—' : `${Math.round(n * 100)}%`);
@@ -71,6 +72,7 @@ function EnvRow({ projectId, e }: { projectId: string; e: EnvironmentHealth }) {
         {bytes(e.memoryBytes)}
         {e.memoryLimitBytes ? <span className="muted"> / {bytes(e.memoryLimitBytes)}{memPct !== null && ` (${pct(memPct)})`}</span> : null}
       </td>
+      <td className="mono" data-label="Storage" data-testid={`storage-${e.name}`}>{bytes(e.diskBytes)}</td>
       <td data-label="Alerts">
         <Alerts
           alerts={e.alerts}
@@ -146,7 +148,7 @@ export default async function ProjectsPage() {
               <p className="muted">No environments yet.</p>
             ) : (
               <table className="stack">
-                <thead><tr><th>Environment</th><th>Deployment</th><th>Health</th><th>CPU</th><th>Memory</th><th>Alerts</th><th /></tr></thead>
+                <thead><tr><th>Environment</th><th>Deployment</th><th>Health</th><th>CPU</th><th>Memory</th><th>Storage</th><th>Alerts</th><th /></tr></thead>
                 <tbody>{p.environments.map((e) => <EnvRow key={e.id} projectId={p.id} e={e} />)}</tbody>
               </table>
             )}

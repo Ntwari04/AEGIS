@@ -1,13 +1,19 @@
 import { ContainerCollector, type DockerLike } from './container-collector';
 
 type C = { Id: string; Names: string[]; State: string; Labels?: Record<string, string> };
-type Info = { RestartCount?: number; HostConfig?: { Memory?: number }; State?: { Running?: boolean; Restarting?: boolean; StartedAt?: string; Health?: { Status?: string } } };
+type Info = { SizeRw?: number; RestartCount?: number; HostConfig?: { Memory?: number }; State?: { Running?: boolean; Restarting?: boolean; StartedAt?: string; Health?: { Status?: string } } };
 
 function fake(containers: C[], info: Record<string, Info | Error>, stats: Record<string, any> = {}): DockerLike {
   return {
     listContainers: async () => containers,
     getContainer: (id: string) => ({
-      inspect: async () => { const i = info[id]; if (i instanceof Error) throw i; return i ?? {}; },
+      // Like Docker, the size is only computed when asked for.
+      inspect: async (opts?: { size?: boolean }) => {
+        const i = info[id];
+        if (i instanceof Error) throw i;
+        const { SizeRw, ...rest } = i ?? {};
+        return opts?.size ? { ...rest, SizeRw } : rest;
+      },
       stats: async () => stats[id] ?? {},
     }),
   };
@@ -78,6 +84,44 @@ describe('ContainerCollector', () => {
       { a: { memory_stats: { usage: 10, limit: 16_000_000_000 } } }), () => NOW);
     await c.refresh();
     expect(await c.metrics()).not.toMatch(/^aegisops_container_memory_limit_bytes\{/m);
+  });
+
+  it('exports the container\'s own disk use, measured at most every five minutes, and keeps the last value if a measurement fails', async () => {
+    let now = NOW;
+    const info: Record<string, Info> = { a: { State: { Running: true }, SizeRw: 5_000_000 } };
+    let sizeCalls = 0;
+    let failing = false;
+    const docker: DockerLike = {
+      listContainers: async () => [managed('a', 'app')],
+      getContainer: () => ({
+        inspect: async (opts?: { size?: boolean }) => {
+          if (opts?.size) { sizeCalls++; if (failing) throw new Error('slow'); return info.a; }
+          return { State: info.a.State };
+        },
+        stats: async () => ({}),
+      }),
+    };
+    const c = new ContainerCollector(docker, () => now);
+    const disk = async () => find(await c.metrics(), 'aegisops_container_disk_bytes', 'name="app"')?.split(' ').pop();
+
+    await c.refresh();
+    expect(await disk()).toBe('5000000');
+
+    info.a.SizeRw = 9_000_000;
+    now += 60_000;
+    await c.refresh();
+    expect(sizeCalls).toBe(1); // still fresh: not measured again
+    expect(await disk()).toBe('5000000');
+
+    now += 5 * 60_000;
+    await c.refresh();
+    expect(sizeCalls).toBe(2);
+    expect(await disk()).toBe('9000000');
+
+    failing = true;
+    now += 6 * 60_000;
+    await c.refresh();
+    expect(await disk()).toBe('9000000'); // measurement failed: the previous figure stays
   });
 
   it('exports Docker health as a one-hot series', async () => {

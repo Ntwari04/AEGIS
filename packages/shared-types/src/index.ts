@@ -78,6 +78,8 @@ export interface EnvironmentHealth {
   cpuCores: number | null;
   memoryBytes: number | null;
   memoryLimitBytes: number | null;
+  /** Data the environment's container has written to its own filesystem layer; null when unknown. Excludes the image and volumes. */
+  diskBytes: number | null;
   restarts1h: number | null;
   uptimeSeconds: number | null;
   alerts: AlertDto[];

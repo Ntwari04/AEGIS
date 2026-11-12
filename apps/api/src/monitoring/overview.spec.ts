@@ -4,7 +4,7 @@ const S = (name: string, value: number) => ({ metric: { name }, value });
 const NOW = 1_800_000_000;
 
 function samples(p: Partial<ContainerSamples> = {}): ContainerSamples {
-  return { up: [], restarting: [], cpu: [], memory: [], memoryLimit: [], restarts1h: [], started: [], ...p };
+  return { up: [], restarting: [], cpu: [], memory: [], memoryLimit: [], disk: [], restarts1h: [], started: [], ...p };
 }
 
 function input(over: Partial<OverviewInput> = {}): OverviewInput {
@@ -19,10 +19,10 @@ describe('buildProjects: environment health', () => {
     const [p] = buildProjects(input({
       expected: new Map([['e1', 'c-1']]),
       latest: new Map([['e1', { status: 'SUCCESS', commitSha: 'abc', at: new Date('2026-11-03T10:00:00Z') }]]),
-      samples: samples({ up: [S('c-1', 1)], restarting: [S('c-1', 0)], cpu: [S('c-1', 0.25)], memory: [S('c-1', 50_000_000)], memoryLimit: [S('c-1', 256_000_000)], restarts1h: [S('c-1', 0)], started: [S('c-1', NOW - 3600)] }),
+      samples: samples({ up: [S('c-1', 1)], restarting: [S('c-1', 0)], cpu: [S('c-1', 0.25)], memory: [S('c-1', 50_000_000)], memoryLimit: [S('c-1', 256_000_000)], disk: [S('c-1', 12_000_000)], restarts1h: [S('c-1', 0)], started: [S('c-1', NOW - 3600)] }),
     }));
     const e = p.environments[0];
-    expect(e).toMatchObject({ state: 'up', container: 'c-1', cpuCores: 0.25, memoryBytes: 50_000_000, memoryLimitBytes: 256_000_000, restarts1h: 0, uptimeSeconds: 3600 });
+    expect(e).toMatchObject({ state: 'up', container: 'c-1', cpuCores: 0.25, memoryBytes: 50_000_000, memoryLimitBytes: 256_000_000, diskBytes: 12_000_000, restarts1h: 0, uptimeSeconds: 3600 });
     expect(e.deployment).toMatchObject({ status: 'SUCCESS', commitSha: 'abc' });
   });
 
