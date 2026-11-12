@@ -20,7 +20,7 @@ Defaults match the local stack (`https://localtest.me`, self-signed certificate)
 | 7 | Developer isolation | a developer sees no projects, cannot open another project by URL, and `authz.project_denied` is in the audit log |
 | 8 | Auditor | sees the project, databases and servers; is offered no deploy, secret, environment, database, container or cordon control |
 
-Steps 7 to 16 go beyond the eight, covering the screens added after Phase 5:
+Steps 7 to 17 go beyond the eight, covering the screens added after Phase 5:
 
 | # | Step | What the test checks |
 |---|---|---|
@@ -33,7 +33,8 @@ Steps 7 to 16 go beyond the eight, covering the screens added after Phase 5:
 | 13 | Page security policy | every main page has a nonce policy with no `'unsafe-inline'` for scripts, every inline script carries that request's nonce and it changes each time, the page trips no violation of its own policy, and an injected inline event handler and inline `<script>` are refused |
 | 14 | Live logs | lines written into a deployed container's output appear in the live view; after a pause and resume each line appears exactly once; a non-member gets 404 and a signed-out visitor is sent to sign in |
 | 15 | Screens read clearly | the not-found page matches the app and leads back; times name their month and zone and carry the exact UTC instant; the project slug follows the name until edited; a refused new-project form comes back filled in; on a phone no page scrolls sideways and a table row keeps its commit cell on screen |
-| 16 | CI key | a key is shown once and only its prefix afterwards; it triggers a deployment of its own project; after revoking it, the same call returns `401` |
+| 16 | Updates in place | during a deployment that takes a minute the history changes by itself, the page is never reloaded, and text typed into another form and a fold opened by hand are still there afterwards; no `meta refresh` remains |
+| 17 | CI key | a key is shown once and only its prefix afterwards; it triggers a deployment of its own project; after revoking it, the same call returns `401` |
 
 ## Things to know
 

@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { api, ApiError } from '@/lib/api';
+import { AutoRefresh } from '@/app/auto-refresh';
 import type { EnvironmentDto, Role } from '@aegisops/shared-types';
 
 type Db = { id: string; name: string; environmentId: string | null; status: 'PROVISIONING' | 'READY' | 'FAILED' | string; error: string | null; createdAt: string };
@@ -33,7 +34,7 @@ export async function DatabasesCard({ projectId, environments, roles }: { projec
 
   return (
     <div className="card" id="databases" data-testid="databases-card">
-      {busy && <meta httpEquiv="refresh" content="3" />}
+      {busy && <AutoRefresh everyMs={3_000} />}
       <strong>Databases</strong>{' '}
       <span className="muted">(each gets its own PostgreSQL role; the connection string is stored encrypted as the environment secret DATABASE_URL)</span>
       {dbs.length === 0 ? (

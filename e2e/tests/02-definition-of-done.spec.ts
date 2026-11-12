@@ -476,7 +476,31 @@ test.describe.serial('definition of done', () => {
     }
   });
 
-  test('16. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
+  test('16. the page updates itself during a deployment without discarding what was typed or unfolded', async () => {
+    test.setTimeout(300_000);
+    await page.goto(`/projects/${state.projectId}`);
+    await page.getByTestId('env-staging').locator('input[name=commitSha]').fill(BAD_SHA); // takes about a minute: it fails its health check and is rolled back
+    await page.getByTestId('deploy-staging').click();
+    const newest = page.getByTestId('history-staging').locator('tbody tr').first().locator('.status');
+    await expect(newest).toHaveAttribute('data-status', /PENDING|RUNNING/, { timeout: 30_000 });
+
+    // The person starts filling in something else, and unfolds a form, while the deployment is still running.
+    await page.getByText('Add a member').click();
+    await page.locator('#member-username').fill('half-typed-name');
+    await page.locator('#member-username').blur(); // not typing any more, so the page is free to refresh
+    await page.evaluate(() => { (window as unknown as { __notReloaded: boolean }).__notReloaded = true; });
+
+    // The history changes by itself...
+    await expect(newest).toHaveAttribute('data-status', /ROLLED_BACK|FAILED/, { timeout: 240_000 });
+
+    // ...and it was updated in place: the page was never reloaded, and nothing the person did was lost.
+    expect(await page.evaluate(() => (window as unknown as { __notReloaded?: boolean }).__notReloaded)).toBe(true);
+    await expect(page.locator('#member-username')).toHaveValue('half-typed-name');
+    await expect(page.locator('details', { has: page.locator('#member-username') })).toHaveAttribute('open', '');
+    expect(await page.locator('meta[http-equiv="refresh"]').count()).toBe(0);
+  });
+
+  test('17. a CI key deploys its own project, is shown only once, and stops working when revoked', async () => {
     test.setTimeout(150_000);
     await page.goto(`/projects/${state.projectId}`);
     await page.locator('#key-name').fill('e2e-ci');

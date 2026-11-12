@@ -3,6 +3,7 @@ import { revalidatePath } from 'next/cache';
 import { api, ApiError } from '@/lib/api';
 import { currentRoles } from '@/lib/permissions';
 import { Time } from '@/app/time';
+import { AutoRefresh } from '@/app/auto-refresh';
 
 type Backup = { id: string; target: string; kind: string; status: string; sizeBytes: number | null; startedAt: string; finishedAt: string | null; error: string | null };
 type Restore = { id: string; backupJobId: string; kind: string; status: string; targetDatabase: string; startedAt: string; durationMs: number | null; error: string | null; integrity: { ok: boolean | null; tables: number | null; rows: number | null; withinRto: boolean | null } | null };
@@ -41,7 +42,7 @@ export default async function BackupsPage({ searchParams }: { searchParams: Prom
   const rtoMin = Math.round(o.rtoSeconds / 60);
   return (
     <>
-      <meta httpEquiv="refresh" content="20" />
+      <AutoRefresh everyMs={20_000} />
       <div className="row">
         <h1>Backups &amp; recovery</h1>
         {admin && <form action={drillNow}><button data-testid="drill-now">Run restore drill now</button></form>}

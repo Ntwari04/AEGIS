@@ -3,6 +3,7 @@ import { notFound, redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { api, ApiError } from '@/lib/api';
 import { Time } from '@/app/time';
+import { AutoRefresh } from '@/app/auto-refresh';
 import { currentRoles, isPrivileged } from '@/lib/permissions';
 
 type Backup = { id: string; kind: string; status: string; sizeBytes: number | null; startedAt: string; finishedAt: string | null; error: string | null; expired: boolean };
@@ -58,7 +59,7 @@ export default async function DatabasePage({ params, searchParams }: { params: P
 
   return (
     <>
-      <meta httpEquiv="refresh" content={running ? '3' : '30'} />
+      <AutoRefresh everyMs={running ? 3_000 : 30_000} />
       <p><Link href={`/projects/${id}`}>← Back to project</Link></p>
       <h1>Database <span className="mono">{db.name}</span></h1>
       {error && <p className="error" data-testid="page-error">{error}</p>}

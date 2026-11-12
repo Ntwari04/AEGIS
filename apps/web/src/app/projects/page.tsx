@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { auth } from '@/auth';
 import { api } from '@/lib/api';
 import { Time } from '@/app/time';
+import { AutoRefresh } from '@/app/auto-refresh';
 import type { AlertDto, ContainerState, EnvironmentHealth, MonitoringOverview } from '@aegisops/shared-types';
 
 const bytes = (n: number | null) => {
@@ -79,7 +80,7 @@ export default async function ProjectsPage() {
   return (
     <>
       {/* Health changes without a click: refresh every 15s (4s while a deployment is running). */}
-      <meta httpEquiv="refresh" content={inFlight ? '4' : '15'} />
+      <AutoRefresh everyMs={inFlight ? 4_000 : 15_000} />
       <div className="row">
         <h1>Projects</h1>
         {canCreate && <Link className="btn" href="/projects/new" data-testid="new-project">New project</Link>}

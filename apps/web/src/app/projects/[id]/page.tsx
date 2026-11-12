@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { canDeploy, canManageEnvironments, currentRoles, isPrivileged } from '@/lib/permissions';
 import { Time } from '@/app/time';
+import { AutoRefresh } from '@/app/auto-refresh';
 import { ApiKeysCard } from './api-keys-card';
 import { DatabasesCard } from './databases-card';
 import type { DeploymentDto, EnvironmentDto, ProjectDto } from '@aegisops/shared-types';
@@ -180,7 +181,7 @@ export default async function ProjectDetail({
 
   return (
     <>
-      {anyInFlight && <meta httpEquiv="refresh" content="4" />}
+      {anyInFlight && <AutoRefresh everyMs={4_000} />}
       <h1 data-testid="project-name">{p.name}</h1>
       <p className="muted">{p.description ?? 'No description.'}</p>
       <nav className="jump" aria-label="On this page">

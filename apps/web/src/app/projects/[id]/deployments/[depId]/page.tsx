@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
 import { Time } from '@/app/time';
+import { AutoRefresh } from '@/app/auto-refresh';
 import type { DeploymentDto } from '@aegisops/shared-types';
 
 type Detail = DeploymentDto & { logs: string; containerName: string | null; imageRef: string | null };
@@ -25,7 +26,7 @@ export default async function DeploymentPage({
   const running = d.status === 'PENDING' || d.status === 'RUNNING';
   return (
     <>
-      {running && <meta httpEquiv="refresh" content="3" />}
+      {running && <AutoRefresh everyMs={3_000} />}
       <p><Link href={`/projects/${id}`}>← Back to project</Link></p>
       <h1>Deployment <span className="mono">{(d.commitSha ?? '').slice(0, 7) || d.id.slice(0, 8)}</span></h1>
       <div className="card">
