@@ -155,7 +155,7 @@ beforeAll(async () => {
       containerSamples: async () => {
         if (!monitoring.available) throw new Error('prometheus down');
         const m = (value: number) => [{ metric: { name: 'dash-a-live', project: 'dash-a', environment: 'staging' }, value }];
-        return { up: m(monitoring.up), restarting: m(0), cpu: m(0.1), memory: m(1_000_000), memoryLimit: [], restarts1h: m(0), started: m(Date.now() / 1000 - 60) };
+        return { up: m(monitoring.up), restarting: m(0), cpu: m(0.1), memory: m(1_000_000), memoryLimit: [], disk: m(2_000_000), restarts1h: m(0), started: m(Date.now() / 1000 - 60) };
       },
       platformSummary: async () => ({ containersUp: 17, containersTotal: 17, hostMemoryUsed: 0.4, diskUsed: 0.5 }),
       query: async (expr: string) => (expr === 'aegisops_container_up' ? [{ metric: { name: 'aegisops-api', project: '', environment: '' }, value: 1 }] : []),
