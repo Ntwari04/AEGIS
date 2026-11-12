@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import Link from 'next/link';
-import { Space_Grotesk, JetBrains_Mono } from 'next/font/google';
+import localFont from 'next/font/local';
 import { auth } from '@/auth';
 import { signOutEverywhere } from './sign-out';
 import { Nav } from './nav';
@@ -10,10 +10,18 @@ export const metadata = { title: 'AegisOps' };
 // Every page is rendered per request: a statically built page cannot carry the per-request nonce the Content-Security-Policy needs.
 export const dynamic = 'force-dynamic';
 
-// Fonts are fetched from Google when the app is BUILT and then served from our own origin, so the strict Content-Security-Policy
-// (font-src 'self') stays as it is and the browser makes no request to a third party.
-const display = Space_Grotesk({ subsets: ['latin'], weight: ['500', '600'], display: 'swap', variable: '--font-space-grotesk' });
-const mono = JetBrains_Mono({ subsets: ['latin'], weight: '400', display: 'swap', variable: '--font-jetbrains-mono' });
+// The three font files (SIL OFL, licences beside them) live in the repository and are served from our own origin: the strict
+// Content-Security-Policy (font-src 'self') stays as it is, the browser contacts no third party, and the build needs no network
+// (a build that fetched them from Google failed in CI).
+const display = localFont({
+  src: [
+    { path: './fonts/space-grotesk-latin-500-normal.woff2', weight: '500', style: 'normal' },
+    { path: './fonts/space-grotesk-latin-600-normal.woff2', weight: '600', style: 'normal' },
+  ],
+  display: 'swap',
+  variable: '--font-space-grotesk',
+});
+const mono = localFont({ src: './fonts/jetbrains-mono-latin-400-normal.woff2', weight: '400', display: 'swap', variable: '--font-jetbrains-mono' });
 
 const Mark = () => (
   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
